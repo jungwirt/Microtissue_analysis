@@ -1,0 +1,466 @@
+###### QC, integration, annotation of microtissue samples
+###### Original script made by Gino Bonazza, adapted by Maks Necki for microtissue data. 
+######  17 Februrary, 2026
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+``` 
+
+### setup
+
+```{r}
+# Get current file name to make folder
+current_file <- "QC_integration_annotation"
+
+# Load libraries
+library(here)
+library(readr)
+library(readxl)
+library(openxlsx)
+library(Seurat)
+library(DropletUtils)
+library(Matrix)
+library(scDblFinder)
+library(scCustomize)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(tidyverse)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(png)
+library(gridExtra)
+library(knitr)
+library(scales)
+library(RColorBrewer)
+library(Matrix.utils)
+library(tibble)
+library(ggplot2)
+library(scater)
+library(patchwork)
+library(statmod)
+library(ArchR)
+library(clustree)
+library(harmony)
+library(speckle)
+
+#Output paths
+output_dir_data <- here::here("scripts", current_file)
+if (!dir.exists(output_dir_data)) dir.create(output_dir_data)
+
+if (!dir.exists(here::here("docs", "figure"))) dir.create(here::here("scripts", "figure"))
+
+output_dir_figs <- here::here("scripts", "figure", paste0(current_file, ".Rmd"))
+if (!dir.exists(output_dir_figs)) dir.create(output_dir_figs)
+
+```
+
+## Quality control
+
+```{r}
+sample_list <- c(
+  "Sample1/count/sample1_filtered_feature_bc_matrix.h5",
+  "Sample2/count/sample2_filtered_feature_bc_matrix.h5",
+  "Sample3/count/sample3_filtered_feature_bc_matrix.h5",
+  "Sample4/count/sample4_filtered_feature_bc_matrix.h5"
+)
+
+base_dir <- "/mnt/dysk_D/NIKARD_35_probek/demultiplex_results/cDNA5_OCM_demux/outs/per_sample_outs/"
+
+sample_names <- c("CM_2D", "FB_2D", "FB_3D", "CM_FB_3D")
+
+seurat_list <- lapply(seq_along(sample_list), function(i) {
+  counts <- Read10X_h5(file.path(base_dir, sample_list[i]))
+  obj <- CreateSeuratObject(counts = counts, project = "microtissue_analysis")
+  obj$Sample <- sample_names[i]
+  return(obj)
+})
+
+microtissue_preQC <- merge(seurat_list[[1]], y = seurat_list[-1],
+                            add.cell.ids = sample_names,
+                            project = "microtissue_analysis")
+```
+
+## Add metadata: percentage of mitochondrial and ribosomal genes
+
+```{r}
+microtissue_preQC[["percent.mt"]] <- PercentageFeatureSet(microtissue_preQC, pattern = "^MT-")
+microtissue_preQC[["percent.rp"]] <- PercentageFeatureSet(microtissue_preQC, pattern = "^RP[SL]")
+```
+
+
+```{r}
+microtissue_preQC
+unique(microtissue_preQC$Sample) 
+table(microtissue_preQC$Sample)
+```
+
+## Check quality control parameters
+
+```{r}
+p1 <- VlnPlot(microtissue_preQC, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue_preQC, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue_preQC, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue_preQC, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_VlnPlots
+
+```
+
+
+
+```{r}
+p1 <- VlnPlot(microtissue_preQC, features = "nCount_RNA", group.by = "Sample", pt.size = 0, y.max = 20000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue_preQC, features = "nFeature_RNA", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue_preQC, features = "percent.mt", group.by = "Sample", pt.size = 0, y.max = 5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue_preQC, features = "percent.rp", group.by = "Sample", pt.size = 0, y.max = 5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_VlnPlots_zoom <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_VlnPlots_zoom
+
+```
+
+
+## Doublet detection
+
+
+```{r}
+
+DefaultAssay(microtissue_preQC)
+
+Layers(microtissue_preQC[["RNA"]])
+
+microtissue_preQC <- JoinLayers(microtissue_preQC)
+
+Layers(microtissue_preQC[["RNA"]])
+
+```
+
+
+
+
+```{r}
+# Konwersja Seurat -> SCE
+microtissue_preQC_sce <- as.SingleCellExperiment(microtissue_preQC)
+
+# Uruchomienie scDblFinder
+microtissue_preQC_sce <- scDblFinder(
+  microtissue_preQC_sce,
+  samples = "Sample",   # kolumna w metadata z nazwami próbek
+  clusters = FALSE       # jeśli masz jakieś klastry i chcesz je uwzględnić
+)
+
+# Sprawdzenie wyników
+table(microtissue_preQC_sce@colData$scDblFinder.class)
+```
+
+```{r}
+microtissue_preQC_sce <- logNormCounts(microtissue_preQC_sce)
+```
+
+```{r}
+assayNames(microtissue_preQC_sce)
+```
+
+
+```{r}
+microtissue_preQC <- as.Seurat(
+  microtissue_preQC_sce,
+  counts = "counts",    # surowe dane
+  data = "logcounts"    # normalizowane log-transformed dane
+)
+
+rm(microtissue_preQC_sce)
+```
+
+
+```{r}
+singlet_count <- table(microtissue_preQC$scDblFinder.class)["singlet"]
+doublet_count <- table(microtissue_preQC$scDblFinder.class)["doublet"]
+
+microtissue_preQC@meta.data[microtissue_preQC$scDblFinder.class == "singlet", "scDblFinder.n"] <- 
+  paste0("Singlets (n=", singlet_count, ")")
+
+microtissue_preQC@meta.data[microtissue_preQC$scDblFinder.class == "doublet", "scDblFinder.n"] <- 
+  paste0("Doublets (n=", doublet_count, ")")
+
+```
+
+
+```{r}
+levels_order <- c(
+  paste0("Doublets (n=", doublet_count, ")"),
+  paste0("Singlets (n=", singlet_count, ")")
+)
+
+microtissue_preQC$scDblFinder.n <- factor(
+  microtissue_preQC$scDblFinder.n,
+  levels = levels_order
+)
+```
+
+```{r}
+p1 <- VlnPlot(microtissue_preQC, features = c("nCount_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 50000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue_preQC, features = c("nFeature_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) 
+
+QC_pre_Doublets <- p1 + p2 + plot_layout(ncol = 2)
+
+QC_pre_Doublets
+```
+
+```{r}
+output_dir_data <- here::here(current_file)
+
+if (!dir.exists(output_dir_data)) {
+  dir.create(output_dir_data, recursive = TRUE)
+}
+```
+
+```{r}
+saveRDS(microtissue_preQC, 
+        here::here(output_dir_data, "microtissue_preQC.rds"))
+
+```
+
+
+```{r}
+microtissue_preQC <- readRDS(here::here(output_dir_data, "microtissue_preQC.rds"))
+
+```
+
+## Remove Doublets
+
+```{r}
+microtissue <- subset(x = microtissue_preQC, subset = scDblFinder.class == "singlet")
+table(microtissue@meta.data$scDblFinder.class)
+```
+
+```{r}
+rm(microtissue_preQC)
+microtissue@assays[["RAW"]] <- NULL
+DefaultAssay(microtissue) <- "RNA"
+```
+
+## Check quality control parameters after removing doublets
+
+
+```{r}
+p1 <- VlnPlot(microtissue, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_no_doublets_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_no_doublets_VlnPlots
+```
+
+
+```{r}
+p1 <- VlnPlot(microtissue, features = "nCount_RNA", group.by = "Sample", pt.size = 0, y.max = 20000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue, features = "nFeature_RNA", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue, features = "percent.mt", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue, features = "percent.rp", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_no_doublets_VlnPlots_zoom <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_no_doublets_VlnPlots_zoom
+```
+
+## Filter based on number of counts, features and percentage of mitochondrial genes
+
+```{r}
+microtissue <- subset(microtissue, subset = 
+                   nFeature_RNA > 500 &
+                   percent.mt < 1.5 &
+                   nCount_RNA > 1000 &
+                   nCount_RNA < 100000)
+table(microtissue$Sample)
+```
+
+```{r}
+cell_type_cols <- c("#d05050", "#33A02C", "#1F78B4", "#CAB2D6", "#FF7F00", "#B2DF8A", "#B15928", "#FFD000", "#FA95C0", "#FDBF6F", "#6A3D9A", "#7aCDF9", "#E6E600")  
+sample_cols <- DiscretePalette_scCustomize(num_colors = 29, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+batch_cols <- DiscretePalette_scCustomize(num_colors = 9, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+cluster_cols <- DiscretePalette_scCustomize(num_colors = 15, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+```
+
+
+```{r}
+PalettePlot(cell_type_cols) + 
+  PalettePlot(sample_cols) + 
+  PalettePlot(batch_cols) + 
+  PalettePlot(cluster_cols)
+```
+
+## Check quality control parameters after filtering
+
+
+```{r}
+p1 <- VlnPlot(microtissue, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_post_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_post_VlnPlots
+
+```
+
+
+```{r}
+p1 <- VlnPlot(microtissue, features = "nCount_RNA", group.by = "Sample", pt.size = 0, y.max = 20000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue, features = "nFeature_RNA", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue, features = "percent.mt", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue, features = "percent.rp", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_post_VlnPlots_zoom <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_post_VlnPlots_zoom
+
+```
+
+## Integration and clustering
+
+##### Normalization and scaling using SCTransform, regressing out percentage of mitochondrial genes
+```{r}
+DefaultAssay(microtissue) <- "RNA"
+microtissue <- SplitObject(microtissue, split.by = "Sample")
+for (i in 1:length(microtissue)) {
+  microtissue[[i]] <- SCTransform(microtissue[[i]], vst.flavor = "v2", vars.to.regress = c("percent.mt"), return.only.var.genes = TRUE)
+}
+```
+
+## PCA
+
+```{r}
+features <- SelectIntegrationFeatures(object.list = microtissue, nfeatures = 3000)
+microtissue <- merge(x = microtissue[[1]], y = microtissue[2:length(microtissue)], merge.data=TRUE)
+VariableFeatures(microtissue) <- features
+microtissue <- RunPCA(microtissue)
+
+```
+
+
+```{r}
+ElbowPlot(microtissue, ndims = 50)
+
+```
+
+## Clustering without integration:
+
+```{r}
+microtissue <- RunUMAP(microtissue, dims = 1:50)
+microtissue <- FindNeighbors(microtissue, dims = 1:50)
+microtissue <- FindClusters(microtissue, resolution = seq(0.1, 0.8, by=0.1))
+
+```
+
+
+```{r}
+clustree::clustree(microtissue@meta.data[,grep("SCT_snn_res", colnames(microtissue@meta.data))],
+                   prefix = "SCT_snn_res.")
+
+```
+
+
+```{r}
+DimPlot(microtissue, reduction = "umap", shuffle = T,
+        group.by = c("SCT_snn_res.0.1", "SCT_snn_res_0.3", "SCT_snn_res_0.5",  "Sample"), ncol = 3)
+```
+
+## Integrate the samples
+
+```{r}
+microtissue <- RunHarmony(microtissue, 
+                     assay.use="SCT", 
+                     group.by.vars = "Sample", 
+                     dims.use = 1:50, 
+                     plot_convergence=TRUE, 
+                     .options = harmony_options(
+                       max.iter.cluster = 100,
+                       )
+                     )
+
+```
+
+## Clustering after integration
+
+```{r}
+DefaultAssay(microtissue) <- "SCT"
+microtissue <- RunUMAP(microtissue, dims = 1:50, reduction = "harmony")
+microtissue <- FindNeighbors(microtissue, dims = 1:50, reduction = "harmony")
+microtissue <- FindClusters(microtissue, resolution = seq(0.1, 0.8, by=0.1))
+
+```
+
+```{r}
+clustree::clustree(microtissue@meta.data[,grep("SCT_snn_res", colnames(microtissue@meta.data))],
+                   prefix = "SCT_snn_res.")
+```
+
+```{r}
+unique(microtissue$SCT_snn_res.0.1)
+
+```
+
+
+```{r}
+microtissue$SCT_snn_res.0.1 <- factor(microtissue$SCT_snn_res.0.1, levels = c("0", "1", "2", "3", "4"))
+DimPlot(microtissue, reduction = "umap", shuffle = T,
+        group.by = c("SCT_snn_res.0.1", "Sample"), ncol = 2, label=T)
+
+```
+
+## Find the markers that characterize each cell population
+
+```{r}
+DefaultAssay(microtissue) <- "RNA"
+microtissue <- NormalizeData(microtissue)
+Idents(microtissue) <- "SCT_snn_res.0.1"
+Markers <- FindAllMarkers(microtissue, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1)
+write.csv(Markers, here::here(output_dir_data, "Microtissue_Gino_Markers_all_low_quality.csv"))
+Markers_top10 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
+write.csv(Markers_top10, here::here(output_dir_data, "Microtissue_Gino_Markers_top10_low_quality.csv"))
+Markers_top3 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_log2FC))
+write.csv(Markers_top3, here::here(output_dir_data, "Microtissue_Gino_Markers_top3_low_quality.csv"))
+```
+
+
+```{r}
+heatmap_cols <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
+heatmap_cols <- rev(heatmap_cols[1:256])
+Heatmap <- DoHeatmap(subset(microtissue, cells = sample(colnames(microtissue), 15000)), label = FALSE, draw.line = F, features = Markers_top10$gene, assay = "SCT") +
+  scale_fill_gradientn(colours = heatmap_cols) +
+  theme(axis.text.y = element_text(size = 5)) +
+  theme(plot.margin = unit(c(0.1, 0, 0, 0), 
+                           "inches"))
+Heatmap
+
+```
+
