@@ -3,7 +3,7 @@
 ######  17 Februrary, 2026
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ``` 
 
 ### setup
@@ -362,14 +362,13 @@ for (i in 1:length(microtissue)) {
 features <- SelectIntegrationFeatures(object.list = microtissue, nfeatures = 3000)
 microtissue <- merge(x = microtissue[[1]], y = microtissue[2:length(microtissue)], merge.data=TRUE)
 VariableFeatures(microtissue) <- features
-microtissue <- RunPCA(microtissue)
 
+microtissue <- RunPCA(microtissue, assay = "SCT")
 ```
 
 
 ```{r}
 ElbowPlot(microtissue, ndims = 50)
-
 ```
 
 ## Clustering without integration:
@@ -390,8 +389,14 @@ clustree::clustree(microtissue@meta.data[,grep("SCT_snn_res", colnames(microtiss
 
 
 ```{r}
+unique(microtissue$SCT_snn_res.0.3)
+
+```
+
+
+```{r}
 DimPlot(microtissue, reduction = "umap", shuffle = T,
-        group.by = c("SCT_snn_res.0.1", "SCT_snn_res_0.3", "SCT_snn_res_0.5",  "Sample"), ncol = 3)
+        group.by = c("SCT_snn_res.0.1", "SCT_snn_res.0.3", "SCT_snn_res.0.5",  "Sample"), ncol = 3)
 ```
 
 ## Integrate the samples
@@ -399,7 +404,7 @@ DimPlot(microtissue, reduction = "umap", shuffle = T,
 ```{r}
 microtissue <- RunHarmony(microtissue, 
                      assay.use="SCT", 
-                     group.by.vars = "Sample", 
+                     group.by.vars = "Sample",
                      dims.use = 1:50, 
                      plot_convergence=TRUE, 
                      .options = harmony_options(
@@ -425,7 +430,7 @@ clustree::clustree(microtissue@meta.data[,grep("SCT_snn_res", colnames(microtiss
 ```
 
 ```{r}
-unique(microtissue$SCT_snn_res.0.1)
+unique(microtissue$SCT_snn_res.0.2)
 
 ```
 
@@ -444,11 +449,11 @@ DefaultAssay(microtissue) <- "RNA"
 microtissue <- NormalizeData(microtissue)
 Idents(microtissue) <- "SCT_snn_res.0.1"
 Markers <- FindAllMarkers(microtissue, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1)
-write.csv(Markers, here::here(output_dir_data, "Microtissue_Gino_Markers_all_low_quality.csv"))
+write.csv(Markers, here::here(output_dir_data, "Microtissue_SCT_002.csv"))
 Markers_top10 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
-write.csv(Markers_top10, here::here(output_dir_data, "Microtissue_Gino_Markers_top10_low_quality.csv"))
+write.csv(Markers_top10, here::here(output_dir_data, "Microtissue_SCT_002_top10.csv"))
 Markers_top3 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_log2FC))
-write.csv(Markers_top3, here::here(output_dir_data, "Microtissue_Gino_Markers_top3_low_quality.csv"))
+write.csv(Markers_top3, here::here(output_dir_data, "Microtissue_SCT_002_top3.csv"))
 ```
 
 
