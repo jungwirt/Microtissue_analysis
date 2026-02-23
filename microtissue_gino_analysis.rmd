@@ -348,62 +348,39 @@ QC_post_VlnPlots_zoom
 ## Integration and clustering
 
 ##### Normalization and scaling using SCTransform, regressing out percentage of mitochondrial genes
-```{r}
-DefaultAssay(microtissue) <- "RNA"
-microtissue <- SplitObject(microtissue, split.by = "Sample")
-for (i in 1:length(microtissue)) {
-  microtissue[[i]] <- SCTransform(microtissue[[i]], vst.flavor = "v2", vars.to.regress = c("percent.mt"), return.only.var.genes = TRUE)
-}
-```
-
-## PCA
-
-```{r}
-features <- SelectIntegrationFeatures(object.list = microtissue, nfeatures = 3000)
-microtissue <- merge(x = microtissue[[1]], y = microtissue[2:length(microtissue)], merge.data=TRUE)
-VariableFeatures(microtissue) <- features
-
-microtissue <- RunPCA(microtissue, assay = "SCT")
-```
-
-
-```{r}
-ElbowPlot(microtissue, ndims = 50)
-```
 
 ## Clustering without integration:
 
 ```{r}
-microtissue <- RunUMAP(microtissue, dims = 1:50)
-microtissue <- FindNeighbors(microtissue, dims = 1:50)
-microtissue <- FindClusters(microtissue, resolution = seq(0.1, 0.8, by=0.1))
+microtissue_sct <- microtissue
 
+
+DefaultAssay(microtissue_sct) <- "RNA"
+
+
+
+microtissue_sct <- SCTransform(microtissue_sct) |>
+  RunPCA() |>
+  FindNeighbors() |>
+  RunUMAP(dims = 1:50) |>
+  FindClusters(resolution = seq(0.1, 0.8, by=0.1))
 ```
 
 
 ```{r}
-clustree::clustree(microtissue@meta.data[,grep("SCT_snn_res", colnames(microtissue@meta.data))],
+clustree::clustree(microtissue_sct@meta.data[,grep("SCT_snn_res", colnames(microtissue_sct@meta.data))],
                    prefix = "SCT_snn_res.")
 
-```
-
-
-```{r}
-unique(microtissue$SCT_snn_res.0.3)
-
-```
-
-
-```{r}
-DimPlot(microtissue, reduction = "umap", shuffle = T,
-        group.by = c("SCT_snn_res.0.1", "SCT_snn_res.0.3", "SCT_snn_res.0.5",  "Sample"), ncol = 3)
 ```
 
 ## Integrate the samples
 
 ```{r}
+microtissue <- SCTransform(microtissue) |>
+  RunPCA(npcs = 50, verbose = FALSE)
+
+
 microtissue <- RunHarmony(microtissue, 
-                     assay.use="SCT", 
                      group.by.vars = "Sample",
                      dims.use = 1:50, 
                      plot_convergence=TRUE, 
@@ -417,8 +394,9 @@ microtissue <- RunHarmony(microtissue,
 ## Clustering after integration
 
 ```{r}
-DefaultAssay(microtissue) <- "SCT"
+#DefaultAssay(microtissue) <- "SCT"
 microtissue <- RunUMAP(microtissue, dims = 1:50, reduction = "harmony")
+#microtissue@graphs <- list()
 microtissue <- FindNeighbors(microtissue, dims = 1:50, reduction = "harmony")
 microtissue <- FindClusters(microtissue, resolution = seq(0.1, 0.8, by=0.1))
 
@@ -430,30 +408,39 @@ clustree::clustree(microtissue@meta.data[,grep("SCT_snn_res", colnames(microtiss
 ```
 
 ```{r}
-unique(microtissue$SCT_snn_res.0.2)
+DimPlot(microtissue_sct, reduction = "umap", shuffle = T, group.by = c("SCT_snn_res.0.1", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform without harmony") -> p1
+DimPlot(microtissue, reduction = "umap", shuffle = T, group.by = c("SCT_snn_res.0.1", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p2
+
+png("umap_harmony_baseR.png", width = 1000, height = 800)
+p1 + p2
+dev.off()
+
+
+p1 + p2
 
 ```
 
-
-```{r}
-microtissue$SCT_snn_res.0.1 <- factor(microtissue$SCT_snn_res.0.1, levels = c("0", "1", "2", "3", "4"))
-DimPlot(microtissue, reduction = "umap", shuffle = T,
-        group.by = c("SCT_snn_res.0.1", "Sample"), ncol = 2, label=T)
-
-```
 
 ## Find the markers that characterize each cell population
 
 ```{r}
 DefaultAssay(microtissue) <- "RNA"
-microtissue <- NormalizeData(microtissue)
-Idents(microtissue) <- "SCT_snn_res.0.1"
+if (length(Assays(microtissue)@data) == 0 || length(Assays(microtissue)@data[[1]]) == 0) {
+  microtissue <- NormalizeData(microtissue)
+  microtissue <- FindVariableFeatures(microtissue)
+}
+
+Idents(microtissue) <- microtissue$SCT_snn_res.0.1
+
 Markers <- FindAllMarkers(microtissue, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1)
-write.csv(Markers, here::here(output_dir_data, "Microtissue_SCT_002.csv"))
+
+write.csv(Markers, here::here(output_dir_data, "Microtissue_SCT_01.csv"))
+
 Markers_top10 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
-write.csv(Markers_top10, here::here(output_dir_data, "Microtissue_SCT_002_top10.csv"))
+write.csv(Markers_top10, here::here(output_dir_data, "Microtissue_SCT_01_top10.csv"))
+
 Markers_top3 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_log2FC))
-write.csv(Markers_top3, here::here(output_dir_data, "Microtissue_SCT_002_top3.csv"))
+write.csv(Markers_top3, here::here(output_dir_data, "Microtissue_SCT_01_top3.csv"))
 ```
 
 
@@ -465,7 +452,12 @@ Heatmap <- DoHeatmap(subset(microtissue, cells = sample(colnames(microtissue), 1
   theme(axis.text.y = element_text(size = 5)) +
   theme(plot.margin = unit(c(0.1, 0, 0, 0), 
                            "inches"))
-Heatmap
 
+png("heatmap_top10markers_harmony_microtissue.png", width = 1000, height = 800)
+Heatmap
+dev.off()
+
+
+Heatmap
 ```
 
