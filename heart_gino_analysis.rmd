@@ -1,0 +1,877 @@
+###### QC, integration, annotation of heart samples
+###### Original script made by Gino Bonazza, adapted by Maks Necki for microtissue data. 
+######  17 Februrary, 2026
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+``` 
+
+### setup
+
+```{r}
+# Get current file name to make folder
+current_file <- "QC_integration_annotation_heart"
+
+# Load libraries
+library(here)
+library(readr)
+library(readxl)
+library(openxlsx)
+library(Seurat)
+library(DropletUtils)
+library(Matrix)
+library(scDblFinder)
+library(scCustomize)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(tidyverse)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(png)
+library(gridExtra)
+library(knitr)
+library(scales)
+library(RColorBrewer)
+library(Matrix.utils)
+library(tibble)
+library(ggplot2)
+library(scater)
+library(patchwork)
+library(statmod)
+library(ArchR)
+library(clustree)
+library(harmony)
+library(speckle)
+library(ggrepel)
+library(edgeR)
+
+#Output paths
+output_dir_data <- here::here("scripts", current_file)
+if (!dir.exists(output_dir_data)) dir.create(output_dir_data)
+
+if (!dir.exists(here::here("docs", "figure"))) dir.create(here::here("scripts", "figure"))
+
+output_dir_figs <- here::here("scripts", "figure", paste0(current_file, ".Rmd"))
+if (!dir.exists(output_dir_figs)) dir.create(output_dir_figs)
+
+```
+
+## Quality control
+
+```{r}
+sample_list <- c(
+  "Sample1/count/sample1_filtered_feature_bc_matrix.h5",
+  "Sample2/count/sample2_filtered_feature_bc_matrix.h5",
+  "Sample3/count/sample3_filtered_feature_bc_matrix.h5",
+  "Sample4/count/sample4_filtered_feature_bc_matrix.h5"
+)
+
+base_dir <- "/mnt/dysk_D/NIKARD_35_probek/demultiplex_results/cDNA4_OCM_demux/outs/per_sample_outs/"
+
+sample_names <- c("CZD5 muscle", "CZD16 muscle", "LVAD9 muscle", "LVAD73 muscle")
+
+seurat_list <- lapply(seq_along(sample_list), function(i) {
+  counts <- Read10X_h5(file.path(base_dir, sample_list[i]))
+  obj <- CreateSeuratObject(counts = counts, project = "microtissue_analysis")
+  obj$Sample <- sample_names[i]
+  return(obj)
+})
+
+microtissue_preQC <- merge(seurat_list[[1]], y = seurat_list[-1],
+                            add.cell.ids = sample_names,
+                            project = "microtissue_analysis")
+```
+
+## Add metadata: percentage of mitochondrial and ribosomal genes
+
+```{r}
+microtissue_preQC[["percent.mt"]] <- PercentageFeatureSet(microtissue_preQC, pattern = "^MT-")
+microtissue_preQC[["percent.rp"]] <- PercentageFeatureSet(microtissue_preQC, pattern = "^RP[SL]")
+```
+
+
+```{r}
+microtissue_preQC
+unique(microtissue_preQC$Sample) 
+table(microtissue_preQC$Sample)
+```
+
+## Check quality control parameters
+
+```{r}
+p1 <- VlnPlot(microtissue_preQC, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue_preQC, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue_preQC, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue_preQC, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_VlnPlots
+
+```
+
+
+
+```{r}
+p1 <- VlnPlot(microtissue_preQC, features = "nCount_RNA", group.by = "Sample", pt.size = 0, y.max = 20000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue_preQC, features = "nFeature_RNA", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue_preQC, features = "percent.mt", group.by = "Sample", pt.size = 0, y.max = 5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue_preQC, features = "percent.rp", group.by = "Sample", pt.size = 0, y.max = 5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_VlnPlots_zoom <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_VlnPlots_zoom
+
+```
+
+
+## Doublet detection
+
+
+```{r}
+
+DefaultAssay(microtissue_preQC)
+
+Layers(microtissue_preQC[["RNA"]])
+
+microtissue_preQC <- JoinLayers(microtissue_preQC)
+
+Layers(microtissue_preQC[["RNA"]])
+
+```
+
+
+
+
+```{r}
+# Konwersja Seurat -> SCE
+microtissue_preQC_sce <- as.SingleCellExperiment(microtissue_preQC)
+
+# Uruchomienie scDblFinder
+microtissue_preQC_sce <- scDblFinder(
+  microtissue_preQC_sce,
+  samples = "Sample",   # kolumna w metadata z nazwami próbek
+  clusters = FALSE       # jeśli masz jakieś klastry i chcesz je uwzględnić
+)
+
+# Sprawdzenie wyników
+table(microtissue_preQC_sce@colData$scDblFinder.class)
+```
+
+```{r}
+microtissue_preQC_sce <- logNormCounts(microtissue_preQC_sce)
+```
+
+```{r}
+assayNames(microtissue_preQC_sce)
+```
+
+
+```{r}
+microtissue_preQC <- as.Seurat(
+  microtissue_preQC_sce,
+  counts = "counts",    # surowe dane
+  data = "logcounts"    # normalizowane log-transformed dane
+)
+
+rm(microtissue_preQC_sce)
+```
+
+
+```{r}
+singlet_count <- table(microtissue_preQC$scDblFinder.class)["singlet"]
+doublet_count <- table(microtissue_preQC$scDblFinder.class)["doublet"]
+
+microtissue_preQC@meta.data[microtissue_preQC$scDblFinder.class == "singlet", "scDblFinder.n"] <- 
+  paste0("Singlets (n=", singlet_count, ")")
+
+microtissue_preQC@meta.data[microtissue_preQC$scDblFinder.class == "doublet", "scDblFinder.n"] <- 
+  paste0("Doublets (n=", doublet_count, ")")
+
+```
+
+
+```{r}
+levels_order <- c(
+  paste0("Doublets (n=", doublet_count, ")"),
+  paste0("Singlets (n=", singlet_count, ")")
+)
+
+microtissue_preQC$scDblFinder.n <- factor(
+  microtissue_preQC$scDblFinder.n,
+  levels = levels_order
+)
+```
+
+```{r}
+p1 <- VlnPlot(microtissue_preQC, features = c("nCount_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 50000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue_preQC, features = c("nFeature_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) 
+
+QC_pre_Doublets <- p1 + p2 + plot_layout(ncol = 2)
+
+QC_pre_Doublets
+```
+
+```{r}
+output_dir_data <- here::here(current_file)
+
+if (!dir.exists(output_dir_data)) {
+  dir.create(output_dir_data, recursive = TRUE)
+}
+```
+
+
+```{r}
+saveRDS(microtissue_preQC, 
+        here::here(output_dir_data, "heart_preQC.rds"))
+
+```
+
+
+```{r}
+heart_preQC <- readRDS(here::here(output_dir_data, "heart_preQC.rds"))
+
+```
+
+## Remove Doublets
+
+```{r}
+heart <- subset(x = heart_preQC, subset = scDblFinder.class == "singlet")
+table(heart@meta.data$scDblFinder.class)
+```
+
+```{r}
+rm(heart_preQC)
+heart@assays[["RAW"]] <- NULL
+DefaultAssay(heart) <- "RNA"
+```
+
+## Check quality control parameters after removing doublets
+
+
+```{r}
+p1 <- VlnPlot(microtissue, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_no_doublets_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_no_doublets_VlnPlots
+```
+
+
+```{r}
+p1 <- VlnPlot(microtissue, features = "nCount_RNA", group.by = "Sample", pt.size = 0, y.max = 20000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(microtissue, features = "nFeature_RNA", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(microtissue, features = "percent.mt", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(microtissue, features = "percent.rp", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_no_doublets_VlnPlots_zoom <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_no_doublets_VlnPlots_zoom
+```
+
+## Filter based on number of counts, features and percentage of mitochondrial genes
+
+```{r}
+heart_filtered <- subset(heart, subset = 
+                   nFeature_RNA > 500 &
+                   percent.mt < 1.5 &
+                   nCount_RNA > 1000 &
+                   nCount_RNA < 100000)
+table(heart_filtered$Sample)
+```
+
+```{r}
+cell_type_cols <- c("#d05050", "#33A02C", "#1F78B4", "#CAB2D6", "#FF7F00", "#B2DF8A", "#B15928", "#FFD000", "#FA95C0", "#FDBF6F", "#6A3D9A", "#7aCDF9", "#E6E600")  
+sample_cols <- DiscretePalette_scCustomize(num_colors = 29, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+batch_cols <- DiscretePalette_scCustomize(num_colors = 9, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+cluster_cols <- DiscretePalette_scCustomize(num_colors = 15, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+```
+
+
+```{r}
+PalettePlot(cell_type_cols) + 
+  PalettePlot(sample_cols) + 
+  PalettePlot(batch_cols) + 
+  PalettePlot(cluster_cols)
+```
+
+## Check quality control parameters after filtering
+
+
+```{r}
+p1 <- VlnPlot(heart_filtered, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(heart_filtered, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(heart_filtered, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(heart_filtered, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_post_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_post_VlnPlots
+
+```
+
+
+```{r}
+p1 <- VlnPlot(heart_filtered, features = "nCount_RNA", group.by = "Sample", pt.size = 0, y.max = 20000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(heart_filtered, features = "nFeature_RNA", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(heart_filtered, features = "percent.mt", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(heart_filtered, features = "percent.rp", group.by = "Sample", pt.size = 0, y.max = 1.5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_post_VlnPlots_zoom <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_post_VlnPlots_zoom
+
+```
+
+## Integration and clustering
+
+##### Normalization and scaling using SCTransform, regressing out percentage of mitochondrial genes
+
+## Clustering without integration:
+
+```{r}
+heart_sct <- heart_filtered
+
+DefaultAssay(heart_sct) <- "RNA"
+
+heart_sct <- SCTransform(heart_sct) |>
+  RunPCA() |>
+  FindNeighbors() |>
+  RunUMAP(dims = 1:50) |>
+  FindClusters(resolution = seq(0.1, 0.8, by=0.1))
+```
+
+
+```{r}
+clustree::clustree(heart_sct@meta.data[,grep("SCT_snn_res", colnames(heart_sct@meta.data))],
+                   prefix = "SCT_snn_res.")
+
+```
+
+## Integrate the samples
+
+```{r}
+heart <- SCTransform(heart_filtered) |>
+  RunPCA(npcs = 50, verbose = FALSE)
+
+
+heart <- RunHarmony(heart, 
+                     group.by.vars = "Sample",
+                     dims.use = 1:50, 
+                     plot_convergence=TRUE, 
+                     .options = harmony_options(
+                       max.iter.cluster = 100,
+                       )
+                     )
+
+```
+
+
+```{r}
+colnames(heart@meta.data)
+
+```
+
+
+## Clustering after integration
+
+```{r}
+#DefaultAssay(heart) <- "SCT"
+heart <- RunUMAP(heart, dims = 1:50, reduction = "harmony")
+#heart@graphs <- list()
+heart <- FindNeighbors(heart, dims = 1:50, reduction = "harmony", graph.name = "harmony_snn")
+heart <- FindClusters(heart, graph.name = "harmony_snn", resolution = seq(0.01, 0.08, by=0.01))
+
+```
+
+```{r}
+clustree::clustree(heart@meta.data[,grep("harmony_snn_res", colnames(heart@meta.data))],
+                   prefix = "harmony_snn_res.")
+```
+
+```{r}
+DimPlot(heart_sct, reduction = "umap", shuffle = T, group.by = c("SCT_snn_res.0.01", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform without harmony") -> p1
+DimPlot(heart, reduction = "umap", shuffle = T, group.by = c("harmony_snn_res.0.01", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p2
+
+png("umap_harmony_heart.png", width = 1000, height = 800)
+p1 + p2
+dev.off()
+
+png("umap_heart_harmony_v2.png", width = 1000, height = 800)
+p2
+dev.off()
+
+p1 + p2
+
+```
+
+
+```{r}
+DimPlot(heart, reduction = "umap", shuffle = T, group.by = c("harmony_snn_res.0.01"), ncol = 1, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p3 
+
+png("heart_harmony_snn_res001_clustered.png", width = 1000, height = 800)
+p3
+dev.off()
+
+```
+
+
+## Find the markers that characterize each cell population
+
+```{r}
+DefaultAssay(heart) <- "RNA"
+if (length(Assays(heart)@data) == 0 || length(Assays(heart)@data[[1]]) == 0) {
+  heart <- NormalizeData(heart)
+  heart <- FindVariableFeatures(heart)
+}
+
+Idents(heart) <- heart$harmony_snn_res.0.1
+
+Markers <- FindAllMarkers(heart, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1)
+
+write.csv(Markers, here::here(output_dir_data, "Heart_harmony_01.csv"))
+
+Markers_top10 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
+write.csv(Markers_top10, here::here(output_dir_data, "Heart_harmony_01_top10.csv"))
+
+Markers_top3 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_log2FC))
+write.csv(Markers_top3, here::here(output_dir_data, "Heart_harmony_01_top3.csv"))
+```
+
+
+```{r}
+heatmap_cols <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
+heatmap_cols <- rev(heatmap_cols[1:256])
+Heatmap <- DoHeatmap(subset(heart, cells = sample(colnames(heart), 8000)), label = FALSE, draw.line = F, features = Markers_top10$gene, assay = "SCT") +
+  scale_fill_gradientn(colours = heatmap_cols) +
+  theme(axis.text.y = element_text(size = 5)) +
+  theme(plot.margin = unit(c(0.1, 0, 0, 0), 
+                           "inches"))
+
+png("heatmap_clustered_harmony_heart.png", width = 1000, height = 800)
+Heatmap
+dev.off()
+
+
+Heatmap
+```
+
+```{r}
+saveRDS(heart_sct, 
+        here::here(output_dir_data, "heart_sct.rds"))
+
+```
+
+
+```{r}
+saveRDS(heart, 
+        here::here(output_dir_data, "heart_harmony.rds"))
+
+```
+
+```{r}
+integrated <- readRDS(here::here(output_dir_data, "heart_harmony.rds"))
+#unintegrated <- readRDS(here::here(output_dir_data, "heart_sct.rds"))
+```
+
+
+```{r}
+png("markers_heart_harmony_featureplot_ part1.png", width = 1000, height = 800)
+FeaturePlot_scCustom(integrated, features = c("TNNI3K", "RYR2", "FGF12", "MYH6",
+                                              "DCN",  "COL1A1", "FN1", "ACTA2", 
+                                              "COMP", "POSTN", "VWF", "PECAM1", 
+                                              "CDH5" , "CD34", "TAGLN", "CNN1"), num_columns = 4)
+dev.off()
+
+
+
+
+
+
+                                           png("markers_heart_harmony_featureplot_ part2.png", width = 1000, height = 800)
+FeaturePlot_scCustom(integrated, features =   c("MYH11", "MYLK", "LMOD1", "ACTG2",
+                                              "PTPRC", "RGS6", "NRXN1", "MRC1", 
+                                              "RGS5", "IL18R1", "PARP8", "SKAP1", 
+                                              "TPD52", "TXNDC5", "EGFLAM", "POU2AF1"), num_columns = 4)
+dev.off()
+
+```
+
+
+```{r}
+png("top10markers_SCT_muscle_featureplot.png", width = 1000, height = 800)
+FeaturePlot_scCustom(unintegrated, features = c("TAGLN", "CNN1", "MYH11", "MYLK", "LMOD1", "ACTG2"), num_columns = 3)
+dev.off()
+```
+
+###### Annotate cell clusters:
+
+```{r}
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("0"), "cell_type"] = "Fibroblasts I"
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("1"), "cell_type"] = "Fibroblasts II"
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("2"), "cell_type"] = "Cardiomyocytes"
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("3"), "cell_type"] = "Epithelial cells"
+integrated$cell_type <- factor(integrated$cell_type, levels = c(
+                                                                        "Fibroblasts I",
+                                                                        "Fibroblasts II",
+                                                                        "Cardiomyocytes",
+                                                                        "Epithelial cells"))
+Idents(integrated) <- integrated$cell_type
+
+```
+
+
+```{r}
+integrated <- ScaleData(integrated)
+mapal <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
+mapal <- rev(mapal[1:256])
+cluster_palette <- c("#F8766D","#24B700", "#00ACFC", "#D575FE")
+Heatmap <- DoHeatmap(integrated, draw.line = F, features = Markers_top10$gene, group.colors = cluster_palette) +
+  guides(colour=FALSE) +
+  scale_fill_gradientn(colours = mapal) +
+  theme(text = element_text(size = 15), axis.text.y = element_text(size = 8)) +
+  theme(plot.margin = unit(c(0.1, 0, 0, 0), 
+                           "inches"))
+
+png("heatmap_clustered_harmony_annotated.png", width = 1000, height = 800)
+Heatmap
+dev.off()
+```
+
+
+```{r}
+p <- DimPlot(integrated, group.by = "cell_type", reduction = "umap", label = F, cols = cluster_palette) + 
+  NoLegend() + 
+  theme(axis.text=element_text(size=14, face = "bold"), axis.title = element_text(size = 18, face = "bold")) + 
+  theme(plot.title = element_blank())
+LabelClusters(p, id = "cell_type", fontface = "bold", size = 5.5, repel = T)
+
+```
+
+
+```{r}
+DotPlot(integrated, assay = "SCT", features = rev(Markers_top3$gene), dot.scale = 5, cluster.idents = FALSE) +
+  RotatedAxis() +
+  coord_flip() +
+  theme(axis.title = element_blank(), axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 13), legend.text = element_text(size = 9), legend.title = element_text(size = 11), plot.margin = unit(c(0, 0, 0, 0.1), 
+                           "inches"))
+
+```
+
+
+
+```{r}
+Markers_top5 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC))
+Idents(integrated) <- factor(integrated$cell_type, levels = rev(levels(integrated$cell_type)))
+DotPlot(integrated, assay = "SCT", features = Markers_top5$gene, dot.scale = 5) +
+  RotatedAxis() +
+  theme(axis.title = element_blank(), axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 13), legend.text = element_text(size = 9), legend.title = element_text(size = 11), plot.margin = unit(c(0, 0, 0, 0.1), 
+                           "inches"))
+
+```
+
+
+
+```{r DGE cluster 1 vs cluster 0}
+Idents(integrated) <- integrated$cell_type
+fibro <- subset(integrated, idents = c("Fibroblasts I", "Fibroblasts II"))
+
+# Porównanie
+Idents(fibro) <- fibro$cell_type
+
+markers_fibro <- FindMarkers(
+  object = fibro,
+  ident.1 = "Fibroblasts I",
+  ident.2 = "Fibroblasts II",
+  assay = "SCT",
+  logfc.threshold = 0,
+  min.pct = 0
+)
+
+markers_fibro$gene <- rownames(markers_fibro)
+
+```
+
+
+```{r vulcanoplot cluster 1 vs cluster 0 single-cell markers}
+top20 <- markers_fibro %>%
+  arrange(desc(abs(avg_log2FC))) %>%
+  slice(1:20)
+
+
+ggplot(markers_fibro, aes(x = avg_log2FC, y = -log10(p_val))) +
+  geom_point(alpha=0.5, color="grey") +
+  coord_cartesian(ylim=c(0,250)) +
+  geom_point(data = subset(markers_fibro, p_val_adj < 0.05 & abs(avg_log2FC) > 0.25), 
+             aes(x = avg_log2FC, y = -log10(p_val)), color="red") +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", color="blue") +
+  geom_vline(xintercept=c(-0.25, 0.25), linetype="dashed", color="blue") +
+  geom_text_repel(data = top20,
+                  aes(label = gene),
+                  size=3,
+                  max.overlaps=20) +
+  theme_classic() +
+  labs(title="Volcano plot: Cluster 0 vs Cluster 1",
+       x="log2 Fold Change", y="-log10(p-value)")
+
+```
+
+
+## Pseudobulk DGE analysis
+
+
+```{r pseudocounts}
+
+fibro <- subset(integrated, subset = cell_type %in% c("Fibroblasts I", "Fibroblasts II"))
+
+pseudocounts <- AggregateExpression(
+  fibro,
+  assays = "RNA",
+  group.by = c("Sample", "cell_type")
+)$RNA
+
+
+#colnames(pseudocounts)
+
+```
+
+
+```{r getting metadata for pseudobulk}
+sample <- sub("_.*", "", colnames(pseudocounts))
+cell_type <- sub(".*_", "", colnames(pseudocounts))
+
+metadata <- data.frame(
+  sample = sample,
+  cell_type = cell_type
+)
+
+```
+
+
+```{r}
+dge <- DGEList(counts = pseudocounts)
+dge$samples$group <- metadata$cell_type
+
+
+# filtr próbek
+keep_samples <- dge$samples$lib.size > 5e4
+dge <- dge[, keep_samples]
+
+# filtr genów
+keep_genes <- filterByExpr(dge, group = dge$samples$group)
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+```
+
+
+```{r DGE pseudobulk cluster 1 vs cluster 0}
+
+dge <- calcNormFactors(dge)
+dge$samples$group <- make.names(dge$samples$group)
+
+design <- model.matrix(~0 + dge$samples$group)
+colnames(design) <- levels(factor(dge$samples$group))
+```
+
+
+```{r}
+dge <- estimateDisp(dge, design)
+
+fit <- glmFit(dge, design)
+
+contrast <- makeContrasts(
+  FibroblastsI_vs_II = `Fibroblasts.I` - `Fibroblasts.II`,
+  levels = design
+)
+
+lrt <- glmLRT(fit, contrast = contrast)
+
+
+```
+
+
+```{r}
+res <- topTags(lrt, n = Inf)$table
+res$FDR <- p.adjust(res$PValue, method = "fdr")
+
+```
+
+
+```{r volcano plot pseudobulk}
+res$gene <- rownames(res)
+
+res$significant <- res$FDR < 0.05 & abs(res$logFC) > 1
+
+top20 <- res[order(res$FDR), ][1:20, ]
+
+vulcan <- ggplot(res, aes(x = logFC, y = -log10(FDR))) +
+  geom_point(aes(color = significant), alpha = 0.6) +
+  scale_color_manual(values = c("FALSE" = "grey70", "TRUE" = "red")) +
+  geom_text_repel(
+    data = top20,
+    aes(label = gene),
+    size = 3
+  ) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_classic() +
+  theme(legend.position = "none")
+
+png("fibroI_vs_fibroII_pseudobulk_vulcano.png", width = 1000, height = 800)
+vulcan
+dev.off()
+```
+
+
+```{r cm2d vs cm3d}
+# ============================================
+# 1. Wybór komórek: tylko Cardiomyocytes 2D i 3D
+# ============================================
+cm <- subset(
+  integrated, 
+  subset = cell_type == "Cardiomyocytes" & Sample %in% c("CM_2D", "CM_FB_3D")
+)
+
+# ============================================
+# 2. Tworzymy pseudobulka
+# ============================================
+# Agregujemy ekspresję na poziomie próbek
+pseudocounts <- AggregateExpression(
+  cm,
+  assays = "RNA",
+  group.by = "Sample"
+)$RNA
+
+# ============================================
+# 3. Tworzymy metadata do DGE
+# ============================================
+metadata <- data.frame(
+  sample = colnames(pseudocounts),
+  group  = colnames(pseudocounts)  # każda kolumna = grupa
+)
+
+dge <- DGEList(counts = pseudocounts)
+
+metadata$group <- ifelse(grepl("CM-2D", metadata$sample), "CM-2D", "CM-FB-3D")
+metadata$group <- factor(metadata$group, levels = c("CM-2D", "CM-FB-3D"))
+dge$samples$group <- metadata$group
+dge$samples$group <- make.names(dge$samples$group) 
+
+# Filtr próbek i genów
+keep_samples <- dge$samples$lib.size > 5e4
+dge <- dge[, keep_samples]
+
+keep_genes <- filterByExpr(dge, group = dge$samples$group)
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+
+# Normalizacja
+dge <- calcNormFactors(dge)
+
+```
+
+
+```{r}
+design <- model.matrix(~0 + dge$samples$group)
+colnames(design) <- levels(dge$samples$group)
+
+# Sprawdzenie, czy mamy dwa poziomy
+levels(dge$samples$group)
+
+
+contrast <- makeContrasts(CM2D_vs_CMFB3D = `CM.2D` - `CM.FB.3D`, levels = design)
+
+# Estymacja i test
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+lrt <- glmLRT(fit, contrast = contrast)
+res <- topTags(lrt, n=Inf)$table
+res$FDR <- p.adjust(res$PValue, method="fdr")
+
+```
+
+
+
+```{r CM2D vs CM3D}
+cm <- subset(integrated, subset = cell_type == "Cardiomyocytes" & Sample %in% c("CM_2D", "CM_FB_3D"))
+
+pseudocounts <- AggregateExpression(
+cm,
+assays = "RNA",
+group.by = c("Sample"),
+)$RNA
+
+
+metadata <- data.frame(
+sample = colnames(pseudocounts),
+group = colnames(pseudocounts) # nazwa grupy = nazwa sample
+)
+
+metadata$group <- factor(metadata$group, levels = c("CM-2D", "CM-3D"))
+
+```
+
+
+```{r}
+dge <- DGEList(counts = pseudocounts)
+dge$samples$group <- metadata$group
+
+
+keep_samples <- dge$samples$lib.size > 5e4
+dge <- dge[, keep_samples]
+
+
+keep_genes <- filterByExpr(dge, group = dge$samples$group)
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+
+dge <- calcNormFactors(dge)
+
+dge$samples$group <- make.names(dge$samples$group)
+design <- model.matrix(~0 + dge$samples$group)
+colnames(design) <- levels(factor(dge$samples$group))
+```
+
+
+```{r}
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+
+```
+
+```{r}
+contrast <- makeContrasts(
+CM2D_vs_CM3D = CM.2D - CM.3D,
+levels = design
+)
+
+lrt <- glmLRT(fit, contrast = contrast)
+
+
+res <- topTags(lrt, n = Inf)$table
+res$FDR <- p.adjust(res$PValue, method = "fdr")
+res$gene <- rownames(res)
+
+```
