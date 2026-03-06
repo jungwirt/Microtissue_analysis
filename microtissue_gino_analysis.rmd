@@ -45,6 +45,8 @@ library(ArchR)
 library(clustree)
 library(harmony)
 library(speckle)
+library(ggrepel)
+library(edgeR)
 
 #Output paths
 output_dir_data <- here::here("scripts", current_file)
@@ -354,10 +356,7 @@ QC_post_VlnPlots_zoom
 ```{r}
 microtissue_sct <- microtissue
 
-
 DefaultAssay(microtissue_sct) <- "RNA"
-
-
 
 microtissue_sct <- SCTransform(microtissue_sct) |>
   RunPCA() |>
@@ -391,33 +390,70 @@ microtissue <- RunHarmony(microtissue,
 
 ```
 
+
+```{r}
+colnames(microtissue@meta.data)
+
+```
+
+
 ## Clustering after integration
 
 ```{r}
 #DefaultAssay(microtissue) <- "SCT"
 microtissue <- RunUMAP(microtissue, dims = 1:50, reduction = "harmony")
 #microtissue@graphs <- list()
-microtissue <- FindNeighbors(microtissue, dims = 1:50, reduction = "harmony")
-microtissue <- FindClusters(microtissue, resolution = seq(0.1, 0.8, by=0.1))
+microtissue <- FindNeighbors(microtissue, dims = 1:50, reduction = "harmony", graph.name = "harmony_snn")
+microtissue <- FindClusters(microtissue, graph.name = "harmony_snn", resolution = seq(0.1, 0.8, by=0.1))
 
 ```
 
 ```{r}
-clustree::clustree(microtissue@meta.data[,grep("SCT_snn_res", colnames(microtissue@meta.data))],
-                   prefix = "SCT_snn_res.")
+clustree::clustree(microtissue@meta.data[,grep("harmony_snn_res", colnames(microtissue@meta.data))],
+                   prefix = "harmony_snn_res.")
 ```
 
 ```{r}
 DimPlot(microtissue_sct, reduction = "umap", shuffle = T, group.by = c("SCT_snn_res.0.1", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform without harmony") -> p1
-DimPlot(microtissue, reduction = "umap", shuffle = T, group.by = c("SCT_snn_res.0.1", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p2
+DimPlot(microtissue, reduction = "umap", shuffle = T, group.by = c("harmony_snn_res.0.1", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p2
 
 png("umap_harmony_baseR.png", width = 1000, height = 800)
 p1 + p2
 dev.off()
 
+png("umap_harmony_v2.png", width = 1000, height = 800)
+p2
+dev.off()
 
 p1 + p2
 
+```
+
+
+```{r}
+DimPlot(microtissue, reduction = "umap", shuffle = T, group.by = c("Sample"), ncol = 1, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p3 
+
+png("sample_harmony_clustered.png", width = 1000, height = 800)
+p3
+dev.off()
+
+```
+
+
+## We see that cluster 4 is for tail and we must delete it
+```{r}
+
+microtissue <- subset(microtissue, subset = harmony_snn_res.0.2 != 4)
+
+
+```
+
+## OK, now let's mergte cluster 3 and cluster 4
+
+```{r}
+microtissue$harmony_snn_res.0.1[microtissue$harmony_snn_res.0.1 == 4] <- 1
+microtissue$harmony_snn_res.0.1 <- droplevels(microtissue$harmony_snn_res.0.1)
+Idents(microtissue) <- "harmony_snn_res.0.1"
 ```
 
 
@@ -430,30 +466,30 @@ if (length(Assays(microtissue)@data) == 0 || length(Assays(microtissue)@data[[1]
   microtissue <- FindVariableFeatures(microtissue)
 }
 
-Idents(microtissue) <- microtissue$SCT_snn_res.0.1
+Idents(microtissue) <- microtissue$harmony_snn_res.0.1
 
 Markers <- FindAllMarkers(microtissue, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1)
 
-write.csv(Markers, here::here(output_dir_data, "Microtissue_SCT_01.csv"))
+write.csv(Markers, here::here(output_dir_data, "Microtissue_harmony_01.csv"))
 
 Markers_top10 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
-write.csv(Markers_top10, here::here(output_dir_data, "Microtissue_SCT_01_top10.csv"))
+write.csv(Markers_top10, here::here(output_dir_data, "Microtissue_harmony_01_top10.csv"))
 
 Markers_top3 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_log2FC))
-write.csv(Markers_top3, here::here(output_dir_data, "Microtissue_SCT_01_top3.csv"))
+write.csv(Markers_top3, here::here(output_dir_data, "Microtissue_harmony_01_top3.csv"))
 ```
 
 
 ```{r}
 heatmap_cols <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
 heatmap_cols <- rev(heatmap_cols[1:256])
-Heatmap <- DoHeatmap(subset(microtissue, cells = sample(colnames(microtissue), 15000)), label = FALSE, draw.line = F, features = Markers_top10$gene, assay = "SCT") +
+Heatmap <- DoHeatmap(subset(microtissue, cells = sample(colnames(microtissue), 14000)), label = FALSE, draw.line = F, features = Markers_top10$gene, assay = "SCT") +
   scale_fill_gradientn(colours = heatmap_cols) +
   theme(axis.text.y = element_text(size = 5)) +
   theme(plot.margin = unit(c(0.1, 0, 0, 0), 
                            "inches"))
 
-png("heatmap_top10markers_harmony_microtissue.png", width = 1000, height = 800)
+png("heatmap_clustered_harmony_microtissue.png", width = 1000, height = 800)
 Heatmap
 dev.off()
 
@@ -461,3 +497,385 @@ dev.off()
 Heatmap
 ```
 
+```{r}
+saveRDS(microtissue_sct, 
+        here::here(output_dir_data, "microtissue_sct.rds"))
+
+```
+
+
+```{r}
+saveRDS(microtissue, 
+        here::here(output_dir_data, "microtissue_harmony.rds"))
+
+```
+
+```{r}
+integrated <- readRDS(here::here(output_dir_data, "microtissue_harmony.rds"))
+#unintegrated <- readRDS(here::here(output_dir_data, "microtissue_sct.rds"))
+```
+
+
+```{r}
+png("markers_clustered_harmony_featureplot.png", width = 1000, height = 800)
+FeaturePlot_scCustom(integrated, features = c("TNNI3K", "RYR2", "FGF12", "MYH6",
+                                              "DCN",  "COL1A1", "FN1", "ACTA2", 
+                                              "COMP", "POSTN", "VWF", "PECAM1", 
+                                              "CDH5" , "CD34", "TAGLN", "CNN1", 
+                                              "MYH11", "MYLK", "LMOD1", "ACTG2"), num_columns = 4)
+dev.off()
+```
+
+
+```{r}
+png("top10markers_SCT_muscle_featureplot.png", width = 1000, height = 800)
+FeaturePlot_scCustom(unintegrated, features = c("TAGLN", "CNN1", "MYH11", "MYLK", "LMOD1", "ACTG2"), num_columns = 3)
+dev.off()
+```
+
+###### Annotate cell clusters:
+
+```{r}
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("0"), "cell_type"] = "Fibroblasts I"
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("1"), "cell_type"] = "Fibroblasts II"
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("2"), "cell_type"] = "Cardiomyocytes"
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("3"), "cell_type"] = "Epithelial cells"
+integrated$cell_type <- factor(integrated$cell_type, levels = c(
+                                                                        "Fibroblasts I",
+                                                                        "Fibroblasts II",
+                                                                        "Cardiomyocytes",
+                                                                        "Epithelial cells"))
+Idents(integrated) <- integrated$cell_type
+
+```
+
+
+```{r}
+integrated <- ScaleData(integrated)
+mapal <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
+mapal <- rev(mapal[1:256])
+cluster_palette <- c("#F8766D","#24B700", "#00ACFC", "#D575FE")
+Heatmap <- DoHeatmap(integrated, draw.line = F, features = Markers_top10$gene, group.colors = cluster_palette) +
+  guides(colour=FALSE) +
+  scale_fill_gradientn(colours = mapal) +
+  theme(text = element_text(size = 15), axis.text.y = element_text(size = 8)) +
+  theme(plot.margin = unit(c(0.1, 0, 0, 0), 
+                           "inches"))
+
+png("heatmap_clustered_harmony_annotated.png", width = 1000, height = 800)
+Heatmap
+dev.off()
+```
+
+
+```{r}
+p <- DimPlot(integrated, group.by = "cell_type", reduction = "umap", label = F, cols = cluster_palette) + 
+  NoLegend() + 
+  theme(axis.text=element_text(size=14, face = "bold"), axis.title = element_text(size = 18, face = "bold")) + 
+  theme(plot.title = element_blank())
+LabelClusters(p, id = "cell_type", fontface = "bold", size = 5.5, repel = T)
+
+```
+
+
+```{r}
+DotPlot(integrated, assay = "SCT", features = rev(Markers_top3$gene), dot.scale = 5, cluster.idents = FALSE) +
+  RotatedAxis() +
+  coord_flip() +
+  theme(axis.title = element_blank(), axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 13), legend.text = element_text(size = 9), legend.title = element_text(size = 11), plot.margin = unit(c(0, 0, 0, 0.1), 
+                           "inches"))
+
+```
+
+
+
+```{r}
+Markers_top5 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC))
+Idents(integrated) <- factor(integrated$cell_type, levels = rev(levels(integrated$cell_type)))
+DotPlot(integrated, assay = "SCT", features = Markers_top5$gene, dot.scale = 5) +
+  RotatedAxis() +
+  theme(axis.title = element_blank(), axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 13), legend.text = element_text(size = 9), legend.title = element_text(size = 11), plot.margin = unit(c(0, 0, 0, 0.1), 
+                           "inches"))
+
+```
+
+
+
+```{r DGE cluster 1 vs cluster 0}
+Idents(integrated) <- integrated$cell_type
+fibro <- subset(integrated, idents = c("Fibroblasts I", "Fibroblasts II"))
+
+# Porównanie
+Idents(fibro) <- fibro$cell_type
+
+markers_fibro <- FindMarkers(
+  object = fibro,
+  ident.1 = "Fibroblasts I",
+  ident.2 = "Fibroblasts II",
+  assay = "SCT",
+  logfc.threshold = 0,
+  min.pct = 0
+)
+
+markers_fibro$gene <- rownames(markers_fibro)
+
+```
+
+
+```{r vulcanoplot cluster 1 vs cluster 0 single-cell markers}
+top20 <- markers_fibro %>%
+  arrange(desc(abs(avg_log2FC))) %>%
+  slice(1:20)
+
+
+ggplot(markers_fibro, aes(x = avg_log2FC, y = -log10(p_val))) +
+  geom_point(alpha=0.5, color="grey") +
+  coord_cartesian(ylim=c(0,250)) +
+  geom_point(data = subset(markers_fibro, p_val_adj < 0.05 & abs(avg_log2FC) > 0.25), 
+             aes(x = avg_log2FC, y = -log10(p_val)), color="red") +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", color="blue") +
+  geom_vline(xintercept=c(-0.25, 0.25), linetype="dashed", color="blue") +
+  geom_text_repel(data = top20,
+                  aes(label = gene),
+                  size=3,
+                  max.overlaps=20) +
+  theme_classic() +
+  labs(title="Volcano plot: Cluster 0 vs Cluster 1",
+       x="log2 Fold Change", y="-log10(p-value)")
+
+```
+
+
+## Pseudobulk DGE analysis
+
+
+```{r pseudocounts}
+
+fibro <- subset(integrated, subset = cell_type %in% c("Fibroblasts I", "Fibroblasts II"))
+
+pseudocounts <- AggregateExpression(
+  fibro,
+  assays = "RNA",
+  group.by = c("Sample", "cell_type")
+)$RNA
+
+
+#colnames(pseudocounts)
+
+```
+
+
+```{r getting metadata for pseudobulk}
+sample <- sub("_.*", "", colnames(pseudocounts))
+cell_type <- sub(".*_", "", colnames(pseudocounts))
+
+metadata <- data.frame(
+  sample = sample,
+  cell_type = cell_type
+)
+
+```
+
+
+```{r}
+dge <- DGEList(counts = pseudocounts)
+dge$samples$group <- metadata$cell_type
+
+
+# filtr próbek
+keep_samples <- dge$samples$lib.size > 5e4
+dge <- dge[, keep_samples]
+
+# filtr genów
+keep_genes <- filterByExpr(dge, group = dge$samples$group)
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+```
+
+
+```{r DGE pseudobulk cluster 1 vs cluster 0}
+
+dge <- calcNormFactors(dge)
+dge$samples$group <- make.names(dge$samples$group)
+
+design <- model.matrix(~0 + dge$samples$group)
+colnames(design) <- levels(factor(dge$samples$group))
+```
+
+
+```{r}
+dge <- estimateDisp(dge, design)
+
+fit <- glmFit(dge, design)
+
+contrast <- makeContrasts(
+  FibroblastsI_vs_II = `Fibroblasts.I` - `Fibroblasts.II`,
+  levels = design
+)
+
+lrt <- glmLRT(fit, contrast = contrast)
+
+
+```
+
+
+```{r}
+res <- topTags(lrt, n = Inf)$table
+res$FDR <- p.adjust(res$PValue, method = "fdr")
+
+```
+
+
+```{r volcano plot pseudobulk}
+res$gene <- rownames(res)
+
+res$significant <- res$FDR < 0.05 & abs(res$logFC) > 1
+
+top20 <- res[order(res$FDR), ][1:20, ]
+
+vulcan <- ggplot(res, aes(x = logFC, y = -log10(FDR))) +
+  geom_point(aes(color = significant), alpha = 0.6) +
+  scale_color_manual(values = c("FALSE" = "grey70", "TRUE" = "red")) +
+  geom_text_repel(
+    data = top20,
+    aes(label = gene),
+    size = 3
+  ) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_classic() +
+  theme(legend.position = "none")
+
+png("fibroI_vs_fibroII_pseudobulk_vulcano.png", width = 1000, height = 800)
+vulcan
+dev.off()
+```
+
+
+```{r cm2d vs cm3d}
+# ============================================
+# 1. Wybór komórek: tylko Cardiomyocytes 2D i 3D
+# ============================================
+cm <- subset(
+  integrated, 
+  subset = cell_type == "Cardiomyocytes" & Sample %in% c("CM_2D", "CM_FB_3D")
+)
+
+# ============================================
+# 2. Tworzymy pseudobulka
+# ============================================
+# Agregujemy ekspresję na poziomie próbek
+pseudocounts <- AggregateExpression(
+  cm,
+  assays = "RNA",
+  group.by = "Sample"
+)$RNA
+
+# ============================================
+# 3. Tworzymy metadata do DGE
+# ============================================
+metadata <- data.frame(
+  sample = colnames(pseudocounts),
+  group  = colnames(pseudocounts)  # każda kolumna = grupa
+)
+
+dge <- DGEList(counts = pseudocounts)
+
+metadata$group <- ifelse(grepl("CM-2D", metadata$sample), "CM-2D", "CM-FB-3D")
+metadata$group <- factor(metadata$group, levels = c("CM-2D", "CM-FB-3D"))
+dge$samples$group <- metadata$group
+dge$samples$group <- make.names(dge$samples$group) 
+
+# Filtr próbek i genów
+keep_samples <- dge$samples$lib.size > 5e4
+dge <- dge[, keep_samples]
+
+keep_genes <- filterByExpr(dge, group = dge$samples$group)
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+
+# Normalizacja
+dge <- calcNormFactors(dge)
+
+```
+
+
+```{r}
+design <- model.matrix(~0 + dge$samples$group)
+colnames(design) <- levels(dge$samples$group)
+
+# Sprawdzenie, czy mamy dwa poziomy
+levels(dge$samples$group)
+
+
+contrast <- makeContrasts(CM2D_vs_CMFB3D = `CM.2D` - `CM.FB.3D`, levels = design)
+
+# Estymacja i test
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+lrt <- glmLRT(fit, contrast = contrast)
+res <- topTags(lrt, n=Inf)$table
+res$FDR <- p.adjust(res$PValue, method="fdr")
+
+```
+
+
+
+```{r CM2D vs CM3D}
+cm <- subset(integrated, subset = cell_type == "Cardiomyocytes" & Sample %in% c("CM_2D", "CM_FB_3D"))
+
+pseudocounts <- AggregateExpression(
+cm,
+assays = "RNA",
+group.by = c("Sample"),
+)$RNA
+
+
+metadata <- data.frame(
+sample = colnames(pseudocounts),
+group = colnames(pseudocounts) # nazwa grupy = nazwa sample
+)
+
+metadata$group <- factor(metadata$group, levels = c("CM-2D", "CM-3D"))
+
+```
+
+
+```{r}
+dge <- DGEList(counts = pseudocounts)
+dge$samples$group <- metadata$group
+
+
+keep_samples <- dge$samples$lib.size > 5e4
+dge <- dge[, keep_samples]
+
+
+keep_genes <- filterByExpr(dge, group = dge$samples$group)
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+
+dge <- calcNormFactors(dge)
+
+dge$samples$group <- make.names(dge$samples$group)
+design <- model.matrix(~0 + dge$samples$group)
+colnames(design) <- levels(factor(dge$samples$group))
+```
+
+
+```{r}
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+
+```
+
+```{r}
+contrast <- makeContrasts(
+CM2D_vs_CM3D = CM.2D - CM.3D,
+levels = design
+)
+
+lrt <- glmLRT(fit, contrast = contrast)
+
+
+res <- topTags(lrt, n = Inf)$table
+res$FDR <- p.adjust(res$PValue, method = "fdr")
+res$gene <- rownames(res)
+
+```
