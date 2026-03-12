@@ -28,6 +28,8 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ## Defining where to save analysis and interemediate files
 
 ```{r creating output folder}
+current_file <- "QC_integration_annotation_metformin"
+
 output_dir_data <- here::here(current_file)
 
 if (!dir.exists(output_dir_data)) {
@@ -40,7 +42,6 @@ if (!dir.exists(output_dir_data)) {
 
 ```{r libraries}
 # Get current file name to make folder
-current_file <- "QC_integration_annotation_metformin"
 
 # Load libraries
 library(here)
@@ -134,7 +135,7 @@ cell_ranger_merged <- Read10X_h5_GEO(
 
 ## Merging cellranger with cellbender seurat objects into one big dataframe
 
-```{r merge} 
+```{r merge1} 
 
 # -------------------------
 # SEURAT OBJECT
