@@ -1,0 +1,906 @@
+---
+title: "Quick and easy pipeline for snRNAseq analysis of metformin induced microtissue"
+subtitle: "Adapted from Gino Bonazza DCM samples analysis by Maks Nęcki and Magdalena Czepiec"
+author:
+ - Gino Bonazza
+ - Maks Nęcki
+ - Magdalena Czepiec
+fontsize: 12 pt
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    df_print: paged
+    toc: true
+    number_sections: true
+    toc_float: true
+---
+
+
+# Introduction and importing files for analysis
+
+## Global chunk visibility setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+``` 
+
+
+## Defining where to save analysis and interemediate files
+
+```{r creating output folder}
+output_dir_data <- here::here(current_file)
+
+if (!dir.exists(output_dir_data)) {
+  dir.create(output_dir_data, recursive = TRUE)
+}
+```
+
+
+### Importing necessary libraries
+
+```{r libraries}
+# Get current file name to make folder
+current_file <- "QC_integration_annotation_metformin"
+
+# Load libraries
+library(here)
+library(readr)
+library(readxl)
+library(openxlsx)
+library(Seurat)
+library(DropletUtils)
+library(Matrix)
+library(scDblFinder)
+library(scCustomize)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(tidyverse)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(png)
+library(gridExtra)
+library(knitr)
+library(scales)
+library(RColorBrewer)
+library(Matrix.utils)
+library(tibble)
+library(ggplot2)
+library(scater)
+library(patchwork)
+library(statmod)
+library(ArchR)
+library(clustree)
+library(harmony)
+library(speckle)
+library(ggrepel)
+library(edgeR)
+
+#Output paths
+output_dir_data <- here::here("scripts", current_file)
+if (!dir.exists(output_dir_data)) dir.create(output_dir_data)
+
+if (!dir.exists(here::here("docs", "figure"))) dir.create(here::here("scripts", "figure"))
+
+output_dir_figs <- here::here("scripts", "figure", paste0(current_file, ".Rmd"))
+if (!dir.exists(output_dir_figs)) dir.create(output_dir_figs)
+
+```
+
+## Importing cellranger and cellbender output files
+
+```{r bender + ranger}
+# -------------------------
+# CELLBENDER
+# -------------------------
+
+cell_bender_merged <- Read_CellBender_h5_Multi_File(
+  merge = TRUE,
+  data_dir = "/mnt/dysk_D/NIKARD_35_probek/Lib11_OCM_demux/outs/per_sample_outs",
+  custom_name = "/count/sample_clean_filtered.h5",
+  sample_list = c(
+    "Sample1",
+    "Sample2",
+    "Sample3",
+    "Sample4"
+  ),
+  sample_names = c(
+ "CM_NC", "CM_MET", "CM_TGF", "CM_MET_TGF"
+  )
+)
+
+# -------------------------
+# CELLRANGER
+# -------------------------
+
+cell_ranger_merged <- Read10X_h5_GEO(
+  merge = TRUE,
+  data_dir = "/mnt/dysk_D/NIKARD_35_probek/Lib11_OCM_demux/outs/per_sample_outs",
+  shared_suffix = "/count/sample_filtered_feature_bc_matrix.h5",
+  sample_list = c(
+    "Sample1",
+    "Sample2",
+    "Sample3",
+    "Sample4"
+  ),
+  sample_names = c(
+    "CM_NC", "CM_MET", "CM_TGF", "CM_MET_TGF"
+  )
+)
+
+```
+
+## Merging cellranger with cellbender seurat objects into one big dataframe
+
+```{r merge} 
+
+# -------------------------
+# SEURAT OBJECT
+# -------------------------
+
+common_cells <- intersect(
+  colnames(cell_ranger_merged),
+  colnames(cell_bender_merged)
+)
+
+cell_ranger_merged <- cell_ranger_merged[, common_cells]
+cell_bender_merged <- cell_bender_merged[, common_cells]
+
+metformin_preQC  <- CreateSeuratObject(
+  counts = cell_ranger_merged,
+  assay = "RAW"
+)
+
+metformin_preQC[["RNA"]] <- CreateAssayObject(
+  counts = cell_bender_merged
+)
+
+DefaultAssay(metformin_preQC) <- "RNA"
+```
+
+
+# Quality Control part 1 (mitochondrial and ribosomal genes marking + duplicates)
+
+
+## Adding metadata: percentage of mitochondrial and ribosomal genes (by using regular expressions)
+
+```{r mito + ribo}
+metformin_preQC[["percent.mt"]] <- PercentageFeatureSet(metformin_preQC, pattern = "^MT-")
+metformin_preQC[["percent.rp"]] <- PercentageFeatureSet(metformin_preQC, pattern = "^RP[SL]")
+```
+
+## Creating Sample column in our Seurat object (we substract from ident.orig string before first or second instance of "_" sign)
+
+```{r sample}
+metformin_preQC$Sample <- sub("_[^_]+$", "", colnames(metformin_preQC))
+
+metformin_preQC
+unique(metformin_preQC$Sample) 
+table(metformin_preQC$Sample)
+```
+
+## First violinplot of number of cells, genes and percentage of mitochondrial and ribosomal RNA
+
+```{r violin}
+p1 <- VlnPlot(metformin_preQC, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin_preQC, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(metformin_preQC, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(metformin_preQC, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_VlnPlots
+
+```
+
+## Zoom of the same violinplot (you can change parameters of zooming by modifying y.max parameter inside VLnPlot function)
+
+```{r violin zoomed}
+p1 <- VlnPlot(metformin_preQC, features = "nCount_RNA", group.by = "Sample", pt.size = 0, y.max = 20000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin_preQC, features = "nFeature_RNA", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(metformin_preQC, features = "percent.mt", group.by = "Sample", pt.size = 0, y.max = 5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(metformin_preQC, features = "percent.rp", group.by = "Sample", pt.size = 0, y.max = 5) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_VlnPlots_zoom <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_VlnPlots_zoom
+
+```
+
+## Doublet detection
+
+```{r doublet}
+# Conversion from Seurat format to SCE format (its is necessary for doublet detecion)
+metformin_preQC_sce <- as.SingleCellExperiment(metformin_preQC)
+
+# Running scDblFinder function (main function to detect doublets)
+metformin_preQC_sce <- scDblFinder(
+  metformin_preQC_sce,
+  samples = "Sample",   
+  clusters = FALSE     
+)
+
+# Checking the results - how many singlets and how many doublets
+table(metformin_preQC_sce@colData$scDblFinder.class)
+```
+
+## Normalization (logarithm plus 1) of raw counts
+
+```{r normalization}
+metformin_preQC_sce <- logNormCounts(metformin_preQC_sce)
+```
+
+
+## Creation of new Seurat object: metformin_preQC, we add to this object info about doublets and once again we create "Sample" column
+
+```{r merging with doublet information}
+counts_mat <- assay(metformin_preQC_sce, "counts")
+logcounts_mat <- assay(metformin_preQC_sce, "logcounts")
+
+# we create new seurat object based on SCE dataframe
+metformin_preQC <- CreateSeuratObject(counts = counts_mat, assay = "RNA")
+
+# adding log-normalized layer
+metformin_preQC <- SetAssayData(
+  metformin_preQC,
+  assay = "RNA",
+  layer = "data",
+  new.data = logcounts_mat
+)
+
+# switching to "RNA" as active assay/layer
+DefaultAssay(metformin_preQC) <- "RNA"
+
+# Adding doublet information
+metformin_preQC@meta.data$scDblFinder.class <- colData(metformin_preQC_sce)$scDblFinder.class
+
+
+# Once more adding sample information
+metformin_preQC$Sample <- sub("_[^_]+$", "", colnames(metformin_preQC))
+```
+
+## factorization of doublet findings
+```{r factorization}
+metformin_preQC$scDblFinder.n <- factor(
+  metformin_preQC$scDblFinder.n,
+  levels = levels_order
+)
+```
+
+## Checking how doublets and singlets are distributed across samples
+```{r vulcano2}
+p1 <- VlnPlot(metformin_preQC, features = c("nCount_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 50000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin_preQC, features = c("nFeature_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) 
+
+QC_pre_Doublets <- p1 + p2 + plot_layout(ncol = 2)
+
+QC_pre_Doublets
+```
+
+## First save. Checkpoint!
+```{r checkpoint}
+saveRDS(metformin_preQC, 
+        here::here(output_dir_data, "metformin_ambient_preQC.rds"))
+
+```
+
+## We read saved .rds file
+
+```{r read}
+metformin_preQC <- readRDS(here::here(output_dir_data, "metformin_ambient_preQC.rds"))
+```
+
+## Lastly we remove doublets by `subset()` function
+
+```{r subset}
+metformin <- subset(x = metformin_preQC, subset = scDblFinder.class == "singlet")
+table(metformin@meta.data$scDblFinder.class)
+```
+
+## Removing intermediate files and cleaning "RAW" layer
+
+```{r}
+rm(metformin_preQC)
+metformin@assays[["RAW"]] <- NULL
+DefaultAssay(metformin) <- "RNA"
+```
+
+## Checking quality control parameters after removing doublets
+
+```{r}
+metformin[["percent.mt"]] <- PercentageFeatureSet(metformin, pattern = "^MT-")
+metformin[["percent.rp"]] <- PercentageFeatureSet(metformin, pattern = "^RP[SL]")
+
+
+p1 <- VlnPlot(metformin, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(metformin, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(metformin, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_no_doublets_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_no_doublets_VlnPlots
+```
+
+## Filtering based on number of counts, features and percentage of mitochondrial genes
+
+```{r subsetting}
+metformin <- subset(metformin, subset = 
+                   nFeature_RNA > 500 &
+                   percent.mt < 0.5 & # For metformin we choose lower cutoff (you can change it to 1.5 for example)
+                   nCount_RNA > 1000 & 
+                   nCount_RNA < 100000)
+table(metformin$Sample)
+```
+
+## Part from Gino code, we don't actually use it nor change it
+
+```{r}
+cell_type_cols <- c("#d05050", "#33A02C", "#1F78B4", "#CAB2D6", "#FF7F00", "#B2DF8A", "#B15928", "#FFD000", "#FA95C0", "#FDBF6F", "#6A3D9A", "#7aCDF9", "#E6E600")  
+sample_cols <- DiscretePalette_scCustomize(num_colors = 29, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+batch_cols <- DiscretePalette_scCustomize(num_colors = 9, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+cluster_cols <- DiscretePalette_scCustomize(num_colors = 15, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+```
+
+## Same as above
+
+```{r}
+PalettePlot(cell_type_cols) + 
+  PalettePlot(sample_cols) + 
+  PalettePlot(batch_cols) + 
+  PalettePlot(cluster_cols)
+```
+
+## Check quality control parameters after final filtering
+
+```{r final vulcano}
+p1 <- VlnPlot(metformin, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(metformin, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(metformin, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_post_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_post_VlnPlots
+
+```
+
+
+# Integration and clustering
+
+## Integrate the samples (we use harmony function to integrate all four samples across library 11)
+
+```{r integration}
+metformin <- SCTransform(metformin) |>
+  RunPCA(npcs = 50, verbose = FALSE)
+
+
+metformin <- RunHarmony(metformin, # name of our dataset
+                     group.by.vars = "Sample", #we want integrate by Sample
+                     dims.use = 1:50, # dimensions from PCA, equal to npcs from RunPCA function. If you are certain that you have low variation across sample you can lower it to 1:20
+                     plot_convergence=TRUE, # It draws figure how good samples are integrated
+                     .options = harmony_options(
+                       max.iter.cluster = 100, 
+                       )
+                     )
+
+```
+
+
+## Clustering after integration, we use kNN (k-nearest neiughbours) algorithm to find centroids of clusters, UMAP is short for uniform manifold approximation, it's just a fancy way to showcase PCA components
+
+```{r clustering}
+metformin <- RunUMAP(metformin, dims = 1:50, reduction = "harmony")
+metformin <- FindNeighbors(metformin, dims = 1:50, reduction = "harmony", graph.name = "harmony_snn") # extremely important thing is to add graph.name hypervariable, without it your seurat object wouldnt have proper clustered columns
+metformin <- FindClusters(metformin, graph.name = "harmony_snn", resolution = seq(0.1, 0.8, by=0.1))
+
+```
+
+## Visualizing how many clusters are produced from different resolutions (highest line is for smallest resolution and it is going step by step)
+```{r}
+clustree::clustree(metformin@meta.data[,grep("harmony_snn_res", colnames(metformin@meta.data))],
+                   prefix = "harmony_snn_res.")
+```
+
+## Creation and saving of umap plot for sample and cluster resolution equal to 0.1 (in our case smallest)
+
+```{r umap}
+
+DimPlot(metformin, reduction = "umap", shuffle = T, group.by = c("harmony_snn_res.0.1", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p2
+
+png("umap_metformin_all_harmony_ambient_v2.png", width = 1000, height = 800)
+p2
+dev.off()
+
+p2
+
+```
+
+
+## We see that cluster 3 is for tail genes and we decided upon analysing its features to delete it
+
+```{r deleting}
+
+metformin <- subset(metformin, subset = harmony_snn_res.0.1 != 3)
+
+
+```
+
+## OK, now let's merge cluster 0 and cluster 2. It was revealed from further analysis that they are the same cell type cluster (cardiomyocytes) so we decided to merge it
+
+```{r merge}
+metformin$harmony_snn_res.0.1[metformin$harmony_snn_res.0.1 == 2] <- 0
+metformin$harmony_snn_res.0.1 <- droplevels(metformin$harmony_snn_res.0.1)
+Idents(metformin) <- "harmony_snn_res.0.1"
+```
+
+
+## Find the markers that characterize each cell population. We are saving top10 top3 and all interesting biomarkes into .csv files
+
+```{r biomarkers}
+
+# If we don't at this stage have normalized data (e.g we don't have "data" slot in metadata) - we create it
+
+DefaultAssay(metformin) <- "RNA"
+if (length(Assays(metformin)@data) == 0 || length(Assays(metformin)@data[[1]]) == 0) {
+  metformin <- NormalizeData(metformin)
+  metformin <- FindVariableFeatures(metformin)
+}
+
+Idents(metformin) <- metformin$harmony_snn_res.0.1
+
+Markers <- FindAllMarkers(metformin, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1)
+
+write.csv(Markers, here::here(output_dir_data, "Metformin__metformin_joined_ambient_harmony_v2_01.csv"))
+
+Markers_top10 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
+write.csv(Markers_top10, here::here(output_dir_data, "Metformin_metformin_joined_ambient_harmony_v2_01_top10.csv"))
+
+Markers_top3 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_log2FC))
+write.csv(Markers_top3, here::here(output_dir_data, "Metformin_metformin_joined_ambient_harmony_v2_01_top3.csv"))
+```
+
+
+## We create heatmap to show how good top10 biomarkers are adjusted across clusters
+
+
+```{r heatmap}
+heatmap_cols <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
+heatmap_cols <- rev(heatmap_cols[1:256])
+Heatmap_metformin <- DoHeatmap(subset(metformin, cells = sample(colnames(metformin), 5000)), # Last number is variable. It depends on how much cells you have within your filtered top10 data file
+label = FALSE, draw.line = F, features = Markers_top10$gene, assay = "SCT") +
+  scale_fill_gradientn(colours = heatmap_cols) +
+  theme(axis.text.y = element_text(size = 5)) +
+  theme(plot.margin = unit(c(0.1, 0, 0, 0), 
+                           "inches"))
+
+png("heatmap_clustered_harmony_metformin_joined_ambient_metformin.png", width = 1000, height = 800)
+Heatmap_metformin
+dev.off()
+
+
+Heatmap_metformin
+```
+
+## We save results of clustering and normalization. Checkpoint!
+
+```{r save}
+saveRDS(metformin, 
+        here::here(output_dir_data, "metformin_cleaned.rds"))
+
+```
+
+## We read saved .rds file
+
+```{r read2}
+integrated <- readRDS(here::here(output_dir_data, "metformin_cleaned.rds"))
+```
+
+# Annotation (manual) and description of every cell type population within clusters
+
+
+## We create `featureplot` too see expression of selected biomarkers in clusters. We can divide our clusters into two main populations: Cardiomyocytes and Fibroblasts
+```{r}
+png("markers_metformin_clustered_harmony_ambient_featureplot.png", width = 1000, height = 800)
+FeaturePlot_scCustom(integrated, features = c("TNNI3K", "RYR2", "FGF12", "MYH6", #cardiomyocytes
+                                              "DCN",  "COL1A1", "FN1", "ACTA2", # fibroblasts, myofibroblasts
+                                              "COMP", "POSTN", "VWF", "PECAM1",  # endothelial cells
+                                              "CDH5" , "CD34", "TAGLN", "CNN1", # immune-response fibroblasts
+                                              "MYH11", "MYLK", "LMOD1", "ACTG2"), num_columns = 4) # various other biomarkers
+dev.off()
+```
+
+## Annotate cell clusters:
+
+```{r}
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("0"), "cell_type"] = "Fibromyocytes"
+integrated@meta.data[integrated@meta.data$harmony_snn_res.0.1 %in% c("1"), "cell_type"] = "Fibroblasts"
+
+integrated$cell_type <- factor(integrated$cell_type, levels = c("Fibromyocytes",
+                                                                "Fibroblasts"))
+Idents(integrated) <- integrated$cell_type
+
+```
+
+## We create heatmap but with text to which celltype which cluster belong
+
+```{r heatmap2}
+integrated <- ScaleData(integrated)
+mapal <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
+mapal <- rev(mapal[1:256])
+cluster_palette <- c("#F8766D","#24B700")
+Heatmap <- DoHeatmap(integrated, draw.line = F, features = Markers_top10$gene, group.colors = cluster_palette) +
+  guides(colour=FALSE) +
+  scale_fill_gradientn(colours = mapal) +
+  theme(text = element_text(size = 15), axis.text.y = element_text(size = 8)) +
+  theme(plot.margin = unit(c(0.1, 0, 0, 0), 
+                           "inches"))
+
+png("heatmap_clustered_harmony_annotated_metformin.png", width = 1000, height = 800)
+Heatmap
+dev.off()
+```
+
+## Same here but instead with UMAP, not heatmap:
+
+```{r umap2}
+p <- DimPlot(integrated, group.by = "cell_type", reduction = "umap", label = F, cols = cluster_palette) + 
+  NoLegend() + 
+  theme(axis.text=element_text(size=14, face = "bold"), axis.title = element_text(size = 18, face = "bold")) + 
+  theme(plot.title = element_blank())
+LabelClusters(p, id = "cell_type", fontface = "bold", size = 5.5, repel = T)
+
+```
+
+# Differential gene expression (using estimation of dispersion)
+
+## First we create variable which will describe different conditions between our samples
+
+```{r conditions}
+integrated$condition <- integrated$Sample  
+integrated$condition <- dplyr::recode(integrated$condition,
+                                      "CM_NC"       = "NC",
+                                      "CM_MET"      = "MET",
+                                      "CM_TGF"      = "TGF",
+                                      "CM_MET_TGF"  = "MET_TGF")
+
+# Check
+table(integrated$Sample, integrated$condition)
+```
+
+## Then we subset on which cell type we wnat first to check Differential Expression (DGE)
+
+```{r DGE fibroblasts}
+Idents(integrated) <- integrated$cell_type
+Fibro <- subset(integrated, idents = c("Fibroblasts"))
+
+# NC vs MET
+Idents(Fibro) <- Fibro$condition
+```
+
+# Then we divide fibroblast gene data into two collections: First condition to test - healthy nc vs healthy cells with metformin induced, second condition to test: tgf induced ill cells with tgf cells with metformin
+
+```{r}
+# NC vs MET
+deg_nc_met <- FindMarkers(
+  Fibro,
+  ident.1 = "NC",
+  ident.2 = "MET",
+  assay = "SCT",
+  logfc.threshold = 0,
+  min.pct = 0
+)
+deg_nc_met$gene <- rownames(deg_nc_met)
+
+# TGF vs MET+TGF
+deg_tgf <- FindMarkers(
+  Fibro,
+  ident.1 = "TGF",
+  ident.2 = "MET_TGF",
+  assay = "SCT",
+  logfc.threshold = 0,
+  min.pct = 0
+)
+
+deg_tgf$gene <- rownames(deg_tgf)
+```
+
+## Now we create contrast and design matrix and estimate dispersion. After estimation we use these three outputs to fit them to general linear model
+
+```{r estimate disp}
+# ----------------------------
+# 1. Przygotowanie danych
+# ----------------------------
+# Załóżmy, że masz counts_matrix (raw counts) fibroblastów
+# i metadata z kolumną 'condition' (np. NC, MET, TGF, MET_TGF)
+counts <- as.matrix(GetAssayData(Fibro, assay = "SCT", layer = "counts"))
+
+# wektor grup (musisz mieć dokładnie tyle elementów, ile kolumn w counts)
+group <- factor(Fibro$condition)
+
+# stwórz DGEList
+dge <- DGEList(counts = counts, group = group)
+
+# projekt modelu
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+
+# kontrasty
+contrast_nc_met <- makeContrasts(NC_vs_MET = NC - MET, levels = design)
+contrast_tgf_met <- makeContrasts(TGF_vs_MET_TGF = TGF - `MET_TGF`, levels = design)
+
+# LRT
+lrt_nc_met <- glmLRT(fit, contrast = contrast_nc_met)
+lrt_tgf_met <- glmLRT(fit, contrast = contrast_tgf_met)
+
+```
+
+## We convert `glmLRT` function output to simple dataframes for each experiment:
+
+```{r simple data}
+# ----------------------------
+# 3. Wyniki do data.frame
+# ----------------------------
+deg_nc_met <- topTags(lrt_nc_met, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         fdr = p.adjust(PValue, method = "fdr"),
+         avg_log2FC = logFC)
+
+deg_tgf_met <- topTags(lrt_tgf_met, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         fdr = p.adjust(PValue, method = "fdr"),
+         avg_log2FC = logFC)
+```
+
+## Now we define schema how we will show volcano plot function and genes on it
+
+```{r volcano function}
+# ----------------------------
+# 4. Volcano plot
+# ----------------------------
+volcano_plot <- function(df, title, logfc_cut = 0.25, fdr_cut = 0.05, top_n = 20) {
+  
+  df <- df %>%
+    mutate(Significant = ifelse(fdr < fdr_cut & abs(avg_log2FC) > logfc_cut,
+                                ifelse(avg_log2FC > 0, "Up", "Down"), "ns"))
+  
+  top_genes <- df %>%
+    filter(Significant != "ns") %>%
+    arrange(desc(abs(avg_log2FC))) %>%
+    slice_head(n = top_n)
+  
+  ggplot(df, aes(x = avg_log2FC, y = -log10(fdr))) +
+    geom_point(aes(color = Significant), alpha = 0.5) +
+    scale_color_manual(values = c("Up" = "red", "Down" = "blue", "ns" = "grey")) +
+    geom_hline(yintercept = -log10(fdr_cut), linetype = "dashed", color = "black") +
+    geom_vline(xintercept = c(-logfc_cut, logfc_cut), linetype = "dashed", color = "black") +
+    geom_text_repel(data = top_genes, aes(label = gene), size = 3, max.overlaps = 20) +
+    theme_classic() +
+    labs(title = title, x = "log2 Fold Change", y = "-log10(FDR)")
+}
+```
+
+
+## Lastly we run volcano function on our two dataframes from two conditions, we save it to png file.
+
+```{r}
+# Wyświetlenie
+p1 <- volcano_plot(deg_nc_met, "NC vs MET")
+p2 <- volcano_plot(deg_tgf_met, "TGF vs MET+TGF")
+
+library(patchwork)
+#p1 | 
+p1 | p2
+
+# Zapis do pliku
+png("volcano_edgeR_metformin_Fibromyocytes.png", width = 1600, height = 800)
+p1 | p2
+dev.off()
+```
+
+
+# GSEA - gene set enrichment analysis
+
+```{r}
+gene_rank_df <- deg_tgf_met %>%
+  dplyr::select(gene, avg_log2FC) %>%
+  dplyr::rename(lfc = avg_log2FC) %>%
+  dplyr::filter(!is.na(lfc)) %>%
+  dplyr::distinct()
+
+cat("Input genes:", nrow(gene_rank_df), "\n")
+
+
+gene_rank <- gene_rank_df$lfc
+names(gene_rank) <- gene_rank_df$gene
+
+gene_rank <- sort(gene_rank, decreasing = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+
+gene_map <- clusterProfiler::bitr(
+  names(gene_rank),
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+```
+
+
+```{r}
+cat("Mapped genes:", nrow(gene_map), "\n")
+
+```
+
+```{r}
+gene_rank_df <- gene_rank_df %>%
+  inner_join(gene_map, by = c("gene" = "SYMBOL"))
+
+# Create ranked vector
+geneList <- gene_rank_df$lfc
+names(geneList) <- gene_rank_df$ENTREZID
+
+# remove duplicates FIRST (critical)
+geneList <- geneList[!duplicated(names(geneList))]
+
+# sort decreasing (required for GSEA)
+geneList <- sort(geneList, decreasing = TRUE)
+
+cat("Genes in ranked list:", length(geneList), "\n")
+
+```
+
+```{r}
+# safety check
+if (length(geneList) < 50) {
+  warning("Very small ranked list — GSEA may be unstable")
+}
+
+
+# Run GSEA
+
+GSEA_GO <- tryCatch(
+  gseGO(
+    geneList      = geneList,
+    OrgDb         = org.Hs.eg.db,
+    ont           = "BP",
+    minGSSize     = 5,
+    maxGSSize     = 1000,
+    pvalueCutoff  = 0.05,
+    verbose       = FALSE,
+    eps           = 0,
+    nPermSimple   = 20000
+  ),
+  error = function(e) {
+    message("GSEA failed: ", e$message)
+    NULL
+  }
+)
+
+
+# Compute term similarity
+
+if (!is.null(GSEA_GO) && nrow(as.data.frame(GSEA_GO)) > 0) {
+  GSEA_GO <- pairwise_termsim(GSEA_GO)
+  cat("GSEA terms:", nrow(GSEA_GO@result), "\n")
+} else {
+  message("No significant GSEA terms found.")
+}
+
+```
+
+
+```{r}
+
+activated_terms <- subset(GSEA_GO@result, NES > 0)
+suppressed_terms <- subset(GSEA_GO@result, NES < 0)
+
+# keep full object structure
+GSEA_GO_activated <- GSEA_GO
+GSEA_GO_activated@result <- activated_terms
+
+GSEA_GO_suppressed <- GSEA_GO
+GSEA_GO_suppressed@result <- suppressed_terms
+
+# recompute similarity 
+GSEA_GO_activated <- pairwise_termsim(GSEA_GO_activated)
+GSEA_GO_suppressed <- pairwise_termsim(GSEA_GO_suppressed)
+
+library(enrichplot)
+library(ggplot2)
+library(patchwork)
+
+# -----------------------------
+# Common theme
+# -----------------------------
+emap_theme <- theme(
+  plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+  legend.position = "right"
+)
+
+# -----------------------------
+# Activated terms
+# -----------------------------
+p <- emapplot(
+  GSEA_GO_activated,
+  showCategory = min(40, nrow(GSEA_GO_activated@result)),
+  size_category = 1.0,
+  min_edge = 0.3,
+  layout = "kk"
+)
+
+# ⭐ shrink ONLY term labels
+p$layers[[which(sapply(p$layers, function(x) "GeomTextRepel" %in% class(x$geom)) )]]$aes_params$size <- 3
+
+x <- p +
+  scale_color_gradient2(
+    low = "#3B4CC0",
+    mid = "white",
+    high = "#B40426",
+    midpoint = 0,
+    name = "NES"
+  ) +
+  ggtitle("Activated Terms - metformin vs nc (healthy)") +
+  emap_theme
+
+png("gsea_Fibro_tgf_clean_activated.png", width = 1600, height = 800)
+print(x)
+dev.off()
+
+```
+
+
+```{r}
+p_sup <- emapplot(
+  GSEA_GO_suppressed,
+  showCategory = min(40, nrow(GSEA_GO_suppressed@result)),
+  size_category = 1.0,
+  min_edge = 0.3,
+  layout = "kk"
+)
+
+# ⭐ shrink ONLY term labels
+p_sup$layers[[which(sapply(p_sup$layers, function(x) "GeomTextRepel" %in% class(x$geom)) )]]$aes_params$size <- 3
+
+x <- p_sup +
+  scale_color_gradient2(
+    low = "#3B4CC0",
+    mid = "white",
+    high = "#B40426",
+    midpoint = 0,
+    name = "NES"
+  ) +
+  ggtitle("Suppressed Terms") +
+  emap_theme
+
+png("gsea_Fibro_tgf_clean_supressed.png", width = 1600, height = 800)
+print(x)
+dev.off()
+
+
+```
+
