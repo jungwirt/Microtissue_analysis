@@ -1,0 +1,287 @@
+---
+title: "Quick and easy pipeline for snRNAseq analysis of metformin induced microtissue"
+subtitle: "Adapted from Gino Bonazza DCM samples analysis by Maks Nęcki and Magdalena Czepiec"
+author:
+ - Gino Bonazza
+ - Maks Nęcki
+ - Magdalena Czepiec
+fontsize: 10 pt
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    df_print: paged
+    toc: true
+    number_sections: true
+    toc_float: true
+---
+
+
+# **Introduction and importing files for analysis**
+
+
+## Global chunk visibility setup
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+``` 
+
+
+## Defining where to save analysis and interemediate files.
+
+-.rmd and .csv files will be saved in *QC_integration_annotation_metformin* catalog \  if it's not created then this code will do it. 
+
+```{r creating output folder}
+current_file <- "QC_integration_annotation_metformin"
+
+output_dir_data <- here::here(current_file)
+
+if (!dir.exists(output_dir_data)) {
+  dir.create(output_dir_data, recursive = TRUE)
+}
+```
+
+## Importing necessary libraries
+
+```{r}
+# Function to load libraries with automatic installation
+load_libraries <- function(lib_name, bioconductor = FALSE) {
+  if (!require(lib_name, character.only = TRUE)) {
+    if (bioconductor) {
+      BiocManager::install(lib_name)
+    } else {
+      install.packages(lib_name)
+    }
+    require(lib_name, character.only = TRUE)
+  }
+}
+
+# CRAN libraries
+cran_libs <- c("here", "readr", "readxl", "openxlsx", "Matrix", "dplyr", 
+               "ggplot2", "magrittr", "tidyverse", "reshape2", "pheatmap", 
+               "png", "gridExtra", "knitr", "scales", "RColorBrewer", 
+               "tibble", "patchwork", "statmod", "clustree", "harmony", 
+               "ggrepel", "Matrix.utils")
+
+# Bioconductor libraries
+bioc_libs <- c("Seurat", "DropletUtils", "scDblFinder", "scCustomize", 
+               "S4Vectors", "SingleCellExperiment", "scater", "ArchR", 
+               "speckle", "edgeR")
+
+# Load CRAN libraries
+invisible(sapply(cran_libs, function(x) load_libraries(x, bioconductor = FALSE)))
+
+# Load Bioconductor libraries
+invisible(sapply(bioc_libs, function(x) load_libraries(x, bioconductor = TRUE)))
+```
+
+## Library descriptions:
+
+| Name of library | Description/Function |
+|:---------------:|:--------------------:|
+| here | files check & save |
+| readr | read & save *.rds* files |
+| readxl | read & save *.csv* files |
+| openxlsx | read & write Excel files |
+| Seurat | single-cell RNA-seq analysis |
+| DropletUtils | 10X data processing utilities |
+| Matrix | sparse matrix operations |
+| scDblFinder | doublet detection |
+| scCustomize | scRNA-seq plot customization |
+| dplyr | data manipulation |
+| ggplot2 | data visualization |
+| magrittr | pipe operator support |
+| tidyverse | data science toolkit |
+| reshape2 | data reshaping |
+| S4Vectors | S4 vector structures |
+| SingleCellExperiment | single-cell data container |
+| pheatmap | heatmap visualization |
+| png | PNG image handling |
+| gridExtra | plot and table layouts |
+| knitr | R Markdown rendering |
+| scales | plot scaling utilities |
+| RColorBrewer | color palettes |
+| Matrix.utils | matrix data manipulation |
+| tibble | modern data frames |
+| scater | scRNA-seq QC & visualization |
+| patchwork | plot composition |
+| statmod | statistical modeling |
+| ArchR | scATAC-seq analysis |
+| clustree | cluster resolution visualization |
+| harmony | batch correction & integration |
+| speckle | cell proportion analysis |
+| ggrepel | non-overlapping labels |
+| edgeR | differential expression analysis |
+
+
+# Importing and reading .RDS file after QC
+
+```{r read}
+
+metformin <- readRDS(
+  "/media/maksn/Nowy1/demultiplex_results/scripts/metformin_final_QC.rds"
+)
+
+
+```
+
+
+# Integration and clustering
+
+## Integrate the samples (we use harmony function to integrate all four samples across library 11)
+
+```{r integration}
+metformin <- SCTransform(metformin) |>
+  RunPCA(npcs = 50, verbose = FALSE)
+
+
+metformin <- RunHarmony(metformin, # name of our dataset
+                     group.by.vars = "Sample", #we want integrate by Sample
+                     dims.use = 1:50, # dimensions from PCA, equal to npcs from RunPCA function. If you are certain that you have low variation across sample you can lower it to 1:20
+                     plot_convergence=TRUE, # It draws figure how good samples are integrated
+                     .options = harmony_options(
+                       max.iter.cluster = 100, 
+                       )
+                     )
+
+```
+
+
+## Clustering after integration, we use kNN (k-nearest neiughbours) algorithm to find centroids of clusters, UMAP is short for uniform manifold approximation, it's just a fancy way to showcase PCA components
+
+```{r clustering}
+metformin <- RunUMAP(metformin, dims = 1:50, reduction = "harmony")
+metformin <- FindNeighbors(metformin, dims = 1:50, reduction = "harmony", graph.name = "harmony_snn") # extremely important thing is to add graph.name hypervariable, without it your seurat object wouldnt have proper clustered columns
+metformin <- FindClusters(metformin, graph.name = "harmony_snn", resolution = seq(0.1, 0.8, by=0.1))
+
+```
+
+## Visualizing how many clusters are produced from different resolutions (highest line is for smallest resolution and it is going step by step)
+```{r}
+clustree::clustree(metformin@meta.data[,grep("harmony_snn_res", colnames(metformin@meta.data))],
+                   prefix = "harmony_snn_res.")
+```
+
+## Creation and saving of umap plot for sample and cluster resolution equal to 0.1 (in our case smallest)
+
+```{r umap}
+
+DimPlot(metformin, reduction = "umap", shuffle = T, group.by = c("harmony_snn_res.0.1", "Sample"), ncol = 2, label=T, pt.size = .1) + ggtitle("SCTransform with harmony") -> p2
+
+png("umap_metformin_all_harmony_ambient_v2.png", width = 1000, height = 800)
+p2
+dev.off()
+
+p2
+
+```
+
+
+```{r deleting}
+
+metformin <- subset(metformin, subset = harmony_snn_res.0.1 != 3)
+Idents(metformin) <- "harmony_snn_res.0.1"
+
+```
+
+```{r deleting}
+
+metformin <- subset(metformin, subset = harmony_snn_res.0.1 != 2)
+Idents(metformin) <- "harmony_snn_res.0.1"
+
+```
+
+
+## Let's now do quick sanity check whether the number of genes and cells across sample match everything:
+
+
+```{r}
+
+cat("Cells after integration: ", ncol(metformin), "\n\n")
+cat("Genes after integration: ", nrow(metformin), "\n\n")
+
+
+cat("\nCells per sample AFTER integration:\n")
+print(table(metformin$Sample))
+
+# opcjonalnie: sprawdzenie poziomów klastrów
+cat("\nClusters AFTER integration:\n")
+print(table(Idents(metformin)))
+
+
+```
+
+
+## Find the markers that characterize each cell population. We are saving top10 top3 and all interesting biomarkes into .csv files
+
+```{r biomarkers}
+
+# If we don't at this stage have normalized data (e.g we don't have "data" slot in metadata) - we create it
+
+DefaultAssay(metformin) <- "RNA"
+if (length(Assays(metformin)@data) == 0 || length(Assays(metformin)@data[[1]]) == 0) {
+  metformin <- NormalizeData(metformin)
+  metformin <- FindVariableFeatures(metformin)
+}
+
+Idents(metformin) <- metformin$harmony_snn_res.0.1
+
+Markers <- FindAllMarkers(metformin, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1) %>%
+  arrange(cluster, desc(avg_log2FC))
+
+head(Markers)
+
+```
+
+
+```{r}
+write.csv(
+  Markers,
+  "/mnt/dysk_D/NIKARD_35_probek/demultiplex_results/scripts/QC_integration_annotation_metformin/Metformin_metformin_joined_ambient_harmony_v2_01.csv"
+)
+
+Markers_top10 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
+write.csv(
+  Markers_top10,
+  "/mnt/dysk_D/NIKARD_35_probek/demultiplex_results/scripts/QC_integration_annotation_metformin/Metformin_metformin_joined_ambient_harmony_v2_01_top10.csv"
+)
+
+Markers_top3 <- as.data.frame(Markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_log2FC))
+write.csv(
+  Markers_top3,
+  "/mnt/dysk_D/NIKARD_35_probek/demultiplex_results/scripts/QC_integration_annotation_metformin/Metformin_metformin_joined_ambient_harmony_v2_01_top3.csv"
+)
+```
+
+
+
+## We create heatmap to show how good top10 biomarkers are adjusted across clusters
+
+
+```{r heatmap}
+heatmap_cols <- colorRampPalette(RColorBrewer::brewer.pal(9,"RdBu"))(256)
+heatmap_cols <- rev(heatmap_cols[1:256])
+Heatmap_metformin <- DoHeatmap(subset(metformin, cells = sample(colnames(metformin), 5000)), # Last number is variable. It depends on how much cells you have within your filtered top10 data file
+label = FALSE, draw.line = F, features = Markers_top10$gene, assay = "SCT") +
+  scale_fill_gradientn(colours = heatmap_cols) +
+  theme(axis.text.y = element_text(size = 5)) +
+  theme(plot.margin = unit(c(0.1, 0, 0, 0), 
+                           "inches"))
+
+png("heatmap_clustered_harmony_metformin_joined_ambient_metformin.png", width = 1000, height = 800)
+Heatmap_metformin
+dev.off()
+
+
+Heatmap_metformin
+```
+
+## We save results of clustering and normalization. Checkpoint!
+
+
+```{r save}
+saveRDS(
+  metformin,
+  "/media/maksn/Nowy1/demultiplex_results/scripts/metformin_final_clustered.rds"
+)
+
+```

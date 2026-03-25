@@ -1,0 +1,472 @@
+---
+title: "Quick and easy pipeline for snRNAseq analysis of metformin induced microtissue"
+subtitle: "Adapted from Gino Bonazza DCM samples analysis by Maks Nęcki and Magdalena Czepiec"
+author:
+ - Gino Bonazza
+ - Maks Nęcki
+ - Magdalena Czepiec
+fontsize: 10 pt
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    df_print: paged
+    toc: true
+    number_sections: true
+    toc_float: true
+---
+
+
+# **Introduction and importing files for analysis**
+
+
+## Global chunk visibility setup
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+``` 
+
+
+## Defining where to save analysis and interemediate files.
+
+-.rmd and .csv files will be saved in *QC_integration_annotation_metformin* catalog \  if it's not created then this code will do it. 
+
+```{r creating output folder}
+current_file <- "QC_integration_metformin_clean"
+
+output_dir_data <- here::here(current_file)
+
+if (!dir.exists(output_dir_data)) {
+  dir.create(output_dir_data, recursive = TRUE)
+}
+```
+
+
+## Importing necessary libraries
+
+Preferred version of this code would be with `require()` function since it checks\
+if the library is installed and if not - it automatically installs and loads such libraries.\
+
+```{r}
+# Function to load libraries with automatic installation
+load_libraries <- function(lib_name, bioconductor = FALSE) {
+  if (!require(lib_name, character.only = TRUE)) {
+    if (bioconductor) {
+      BiocManager::install(lib_name)
+    } else {
+      install.packages(lib_name)
+    }
+    require(lib_name, character.only = TRUE)
+  }
+}
+
+# CRAN libraries
+cran_libs <- c("here", "readr", "readxl", "openxlsx", "Matrix", "dplyr", 
+               "ggplot2", "magrittr", "tidyverse", "reshape2", "pheatmap", 
+               "png", "gridExtra", "knitr", "scales", "RColorBrewer", 
+               "tibble", "patchwork", "statmod", "clustree", "harmony", 
+               "ggrepel", "Matrix.utils")
+
+# Bioconductor libraries
+bioc_libs <- c("Seurat", "DropletUtils", "scDblFinder", "scCustomize", 
+               "S4Vectors", "SingleCellExperiment", "scater", "ArchR", 
+               "speckle", "edgeR")
+
+# Load CRAN libraries
+invisible(sapply(cran_libs, function(x) load_libraries(x, bioconductor = FALSE)))
+
+# Load Bioconductor libraries
+invisible(sapply(bioc_libs, function(x) load_libraries(x, bioconductor = TRUE)))
+```
+
+## Library descriptions:
+
+| Name of library | Description/Function |
+|:---------------:|:--------------------:|
+| here | files check & save |
+| readr | read & save *.rds* files |
+| readxl | read & save *.csv* files |
+| openxlsx | read & write Excel files |
+| Seurat | single-cell RNA-seq analysis |
+| DropletUtils | 10X data processing utilities |
+| Matrix | sparse matrix operations |
+| scDblFinder | doublet detection |
+| scCustomize | scRNA-seq plot customization |
+| dplyr | data manipulation |
+| ggplot2 | data visualization |
+| magrittr | pipe operator support |
+| tidyverse | data science toolkit |
+| reshape2 | data reshaping |
+| S4Vectors | S4 vector structures |
+| SingleCellExperiment | single-cell data container |
+| pheatmap | heatmap visualization |
+| png | PNG image handling |
+| gridExtra | plot and table layouts |
+| knitr | R Markdown rendering |
+| scales | plot scaling utilities |
+| RColorBrewer | color palettes |
+| Matrix.utils | matrix data manipulation |
+| tibble | modern data frames |
+| scater | scRNA-seq QC & visualization |
+| patchwork | plot composition |
+| statmod | statistical modeling |
+| ArchR | scATAC-seq analysis |
+| clustree | cluster resolution visualization |
+| harmony | batch correction & integration |
+| speckle | cell proportion analysis |
+| ggrepel | non-overlapping labels |
+| edgeR | differential expression analysis |
+
+## Importing cellranger and cellbender output files
+
+We have mapped results as .h5 file from `cellranger` command, we have also filtered in terms of ambient RNA removal results as a .h5 file from `cellbender`.\
+We have four samples, Sample1, Sample2, Sample3 amd Sample4, they have appropriate names:\
+
+| Sample | Condition |
+|:------:|:---------:|
+| Sample1 | CM_NC |
+| Sample2 | CM_MET |
+| Sample3 | CM_TGF |
+| Sample4 | CM_MET_TGF |
+
+
+```{r bender + ranger}
+
+# -------------------------
+# CELLBENDER
+# -------------------------
+
+cell_bender_merged <- Read_CellBender_h5_Multi_File(
+  merge = TRUE,
+  data_dir = "/mnt/dysk_D/NIKARD_35_probek/Lib11_OCM_demux/outs/per_sample_outs",
+  custom_name = "/count/sample_clean_filtered.h5",
+  sample_list = c(
+    "Sample1",
+    "Sample2",
+    "Sample3",
+    "Sample4"
+  ),
+  sample_names = c(
+ "CM_NC", "CM_MET", "CM_TGF", "CM_MET_TGF"
+  )
+)
+
+# -------------------------
+# CELLRANGER
+# -------------------------
+
+cell_ranger_merged <- Read10X_h5_GEO(
+  merge = TRUE,
+  data_dir = "/mnt/dysk_D/NIKARD_35_probek/Lib11_OCM_demux/outs/per_sample_outs",
+  shared_suffix = "/count/sample_filtered_feature_bc_matrix.h5",
+  sample_list = c(
+    "Sample1",
+    "Sample2",
+    "Sample3",
+    "Sample4"
+  ),
+  sample_names = c(
+    "CM_NC", "CM_MET", "CM_TGF", "CM_MET_TGF"
+  )
+)
+
+```
+
+## Merging cellranger with cellbender seurat objects into one big dataframe
+
+In Seurat object we have set **RNA** as typical assay
+
+```{r merge1} 
+
+# -------------------------
+# SEURAT OBJECT
+# -------------------------
+
+common_cells <- intersect(
+  colnames(cell_ranger_merged),
+  colnames(cell_bender_merged)
+)
+
+cell_ranger_merged <- cell_ranger_merged[, common_cells]
+cell_bender_merged <- cell_bender_merged[, common_cells]
+
+metformin_preQC  <- CreateSeuratObject(
+  counts = cell_ranger_merged,
+  assay = "RAW"
+)
+
+metformin_preQC[["RNA"]] <- CreateAssayObject(
+  counts = cell_bender_merged
+)
+
+DefaultAssay(metformin_preQC) <- "RNA"
+
+
+```
+
+
+# Quality Control part 1 (mitochondrial and ribosomal genes marking + duplicates)
+
+
+## Adding metadata: percentage of mitochondrial and ribosomal genes (by using regular expressions)
+
+We add two columns into our dataframe: percentage of ribosomal and percentage of mitochondrial genes
+
+```{r mito + ribo}
+metformin_preQC[["percent.mt"]] <- PercentageFeatureSet(metformin_preQC, pattern = "^MT-")
+metformin_preQC[["percent.rp"]] <- PercentageFeatureSet(metformin_preQC, pattern = "^RP[SL]")
+```
+
+## Creating Sample column in our Seurat object (we substract from ident.orig string before first or second instance of "_" sign)
+
+### Check control - check number of genes and cells in each sample:
+
+```{r sample}
+metformin_preQC$Sample <- sub("_[^_]+$", "", colnames(metformin_preQC))
+
+metformin_preQC
+unique(metformin_preQC$Sample) 
+table(metformin_preQC$Sample)
+```
+
+## First violinplot of number of cells, genes and percentage of mitochondrial and ribosomal RNA
+
+```{r violin}
+p1 <- VlnPlot(metformin_preQC, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin_preQC, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(metformin_preQC, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(metformin_preQC, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_VlnPlots
+
+```
+
+
+## Doublet detection
+
+```{r doublet, echo = FALSE}
+# Conversion from Seurat format to SCE format (its is necessary for doublet detecion)
+metformin_preQC_sce <- as.SingleCellExperiment(metformin_preQC)
+
+# Running scDblFinder function (main function to detect doublets)
+metformin_preQC_sce <- scDblFinder(
+  metformin_preQC_sce,
+  samples = "Sample",   
+  clusters = FALSE     
+)
+
+# Checking the results - how many singlets and how many doublets
+table(metformin_preQC_sce@colData$scDblFinder.class)
+```
+
+## Normalization (logarithm plus 1) of raw counts
+
+```{r normalization}
+metformin_preQC_sce <- logNormCounts(metformin_preQC_sce)
+```
+
+
+## Creation of new Seurat object: metformin_preQC, we add to this object info about doublets and once again we create "Sample" column
+
+```{r merging with doublet information}
+counts_mat <- assay(metformin_preQC_sce, "counts")
+logcounts_mat <- assay(metformin_preQC_sce, "logcounts")
+
+# we create new seurat object based on SCE dataframe
+metformin_preQC <- CreateSeuratObject(counts = counts_mat, assay = "RNA")
+
+# adding log-normalized layer
+metformin_preQC <- SetAssayData(
+  metformin_preQC,
+  assay = "RNA",
+  layer = "data",
+  new.data = logcounts_mat
+)
+
+# switching to "RNA" as active assay/layer
+DefaultAssay(metformin_preQC) <- "RNA"
+
+# Adding doublet information
+metformin_preQC@meta.data$scDblFinder.class <- colData(metformin_preQC_sce)$scDblFinder.class
+
+
+# Once more adding sample information
+metformin_preQC$Sample <- sub("_[^_]+$", "", colnames(metformin_preQC))
+```
+
+## Creating single/doublet flag column:
+
+```{r flag1}
+singlet_count <- table(metformin_preQC$scDblFinder.class)["singlet"]
+doublet_count <- table(metformin_preQC$scDblFinder.class)["doublet"]
+
+metformin_preQC@meta.data[metformin_preQC$scDblFinder.class == "singlet", "scDblFinder.n"] <- 
+  paste0("Singlets (n=", singlet_count, ")")
+
+metformin_preQC@meta.data[metformin_preQC$scDblFinder.class == "doublet", "scDblFinder.n"] <- 
+  paste0("Doublets (n=", doublet_count, ")")
+
+```
+
+
+```{r flag2}
+levels_order <- c(
+  paste0("Doublets (n=", doublet_count, ")"),
+  paste0("Singlets (n=", singlet_count, ")")
+)
+
+metformin_preQC$scDblFinder.n <- factor(
+  metformin_preQC$scDblFinder.n,
+  levels = levels_order
+)
+```
+
+## factorization of doublet findings
+```{r factorization}
+metformin_preQC$scDblFinder.n <- factor(
+  metformin_preQC$scDblFinder.n,
+  levels = levels_order
+)
+```
+
+## Checking how doublets and singlets are distributed across samples
+```{r vulcano2}
+p1 <- VlnPlot(metformin_preQC, features = c("nCount_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 50000) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin_preQC, features = c("nFeature_RNA"), split.by = "scDblFinder.n", group.by = "Sample", pt.size = 0, y.max = 10000) + theme(axis.title.x = element_blank()) 
+
+QC_pre_Doublets <- p1 + p2 + plot_layout(ncol = 2)
+
+QC_pre_Doublets
+```
+
+## First save. Checkpoint!
+```{r checkpoint11}
+saveRDS(
+  metformin_preQC,
+  "/mnt/dysk_D/NIKARD_35_probek/demultiplex_results/scripts/QC_integration_annotation_metformin/metformin_ambient_preQC.rds"
+)
+
+```
+
+## We read saved .rds file
+
+```{r read}
+metformin_preQC <- readRDS(
+  "/mnt/dysk_D/NIKARD_35_probek/demultiplex_results/scripts/QC_integration_annotation_metformin/metformin_ambient_preQC.rds"
+)
+```
+
+## Lastly we remove doublets by `subset()` function
+
+```{r subset}
+metformin <- subset(x = metformin_preQC, subset = scDblFinder.class == "singlet")
+table(metformin@meta.data$scDblFinder.class)
+```
+
+## Removing intermediate files and cleaning "RAW" layer
+
+```{r}
+#rm(metformin_preQC)
+metformin@assays[["RAW"]] <- NULL
+DefaultAssay(metformin) <- "RNA"
+```
+
+## Checking quality control parameters after removing doublets
+
+```{r}
+metformin[["percent.mt"]] <- PercentageFeatureSet(metformin, pattern = "^MT-")
+metformin[["percent.rp"]] <- PercentageFeatureSet(metformin, pattern = "^RP[SL]")
+
+
+p1 <- VlnPlot(metformin, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(metformin, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(metformin, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_pre_no_doublets_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_pre_no_doublets_VlnPlots
+```
+
+## Filtering based on number of counts, features and percentage of mitochondrial genes
+
+```{r subsetting}
+metformin <- subset(metformin, subset = 
+                   nFeature_RNA > 200 &
+                   percent.mt < 0.5 & # For metformin we choose lower cutoff (you can change it to 1.5 for example)
+                   nCount_RNA > 1000 & 
+                   nCount_RNA < 100000)
+table(metformin$Sample)
+```
+
+## Part from Gino code, we don't actually use it nor change it, since we don't have batch or cluster cols for now
+
+```{r}
+cell_type_cols <- c("#d05050", "#33A02C", "#1F78B4", "#CAB2D6", "#FF7F00", "#B2DF8A", "#B15928", "#FFD000", "#FA95C0", "#FDBF6F", "#6A3D9A", "#7aCDF9", "#E6E600")  
+sample_cols <- DiscretePalette_scCustomize(num_colors = 29, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+batch_cols <- DiscretePalette_scCustomize(num_colors = 9, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+cluster_cols <- DiscretePalette_scCustomize(num_colors = 15, palette = "polychrome", shuffle_pal = TRUE, seed = 220510)
+```
+
+## Same as above
+
+```{r}
+PalettePlot(cell_type_cols) + 
+  PalettePlot(sample_cols) + 
+  PalettePlot(batch_cols) + 
+  PalettePlot(cluster_cols)
+```
+
+## Check quality control parameters after final filtering
+
+```{r final vulcano}
+p1 <- VlnPlot(metformin, features = "nCount_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p2 <- VlnPlot(metformin, features = "nFeature_RNA", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p3 <- VlnPlot(metformin, features = "percent.mt", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+p4 <- VlnPlot(metformin, features = "percent.rp", group.by = "Sample", pt.size = 0) + theme(axis.title.x = element_blank()) + NoLegend()
+
+QC_post_VlnPlots <- p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+
+QC_post_VlnPlots
+
+```
+
+## Final sanity check:
+
+```{r}
+
+
+cat("Before QC:\n\n")
+print(metformin_preQC)
+
+table(metformin_preQC$Sample)
+
+cat("After QC:\n\n")
+print(metformin)
+
+table(metformin$Sample)
+
+
+```
+
+
+## Final part of this code - saving. End of QC!
+```{r checkpoint}
+saveRDS(
+  metformin,
+  "/media/maksn/Nowy1/demultiplex_results/scripts/metformin_final_QC.rds"
+)
+
+```
+

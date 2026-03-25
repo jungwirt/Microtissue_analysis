@@ -1,0 +1,509 @@
+---
+title: "Quick and easy pipeline for snRNAseq analysis of metformin induced microtissue"
+subtitle: "Adapted from Gino Bonazza DCM samples analysis by Maks Nęcki and Magdalena Czepiec"
+author:
+ - Gino Bonazza
+ - Maks Nęcki
+ - Magdalena Czepiec
+fontsize: 10 pt
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    df_print: paged
+    toc: true
+    number_sections: true
+    toc_float: true
+---
+
+
+# **Introduction and importing files for analysis**
+
+
+## Global chunk visibility setup
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+``` 
+
+
+## Defining where to save analysis and interemediate files.
+
+-.rmd and .csv files will be saved in *QC_integration_annotation_metformin* catalog \  if it's not created then this code will do it. 
+
+```{r creating output folder}
+current_file <- "QC_integration_annotation_metformin"
+
+output_dir_data <- here::here(current_file)
+
+if (!dir.exists(output_dir_data)) {
+  dir.create(output_dir_data, recursive = TRUE)
+}
+```
+
+## Importing necessary libraries
+
+```{r}
+# Function to load libraries with automatic installation
+load_libraries <- function(lib_name, bioconductor = FALSE) {
+  if (!require(lib_name, character.only = TRUE)) {
+    if (bioconductor) {
+      BiocManager::install(lib_name)
+    } else {
+      install.packages(lib_name)
+    }
+    require(lib_name, character.only = TRUE)
+  }
+}
+
+# CRAN libraries
+cran_libs <- c("here", "readr", "readxl", "openxlsx", "Matrix", "dplyr", 
+               "ggplot2", "magrittr", "tidyverse", "reshape2", "pheatmap", 
+               "png", "gridExtra", "knitr", "scales", "RColorBrewer", 
+               "tibble", "patchwork", "statmod", "clustree", "harmony", 
+               "ggrepel", "Matrix.utils")
+
+# Bioconductor libraries
+bioc_libs <- c("Seurat", "DropletUtils", "scDblFinder", "scCustomize", 
+               "S4Vectors", "SingleCellExperiment", "scater", "ArchR", 
+               "speckle", "edgeR")
+
+# Load CRAN libraries
+invisible(sapply(cran_libs, function(x) load_libraries(x, bioconductor = FALSE)))
+
+# Load Bioconductor libraries
+invisible(sapply(bioc_libs, function(x) load_libraries(x, bioconductor = TRUE)))
+```
+
+## Library descriptions:
+
+| Name of library | Description/Function |
+|:---------------:|:--------------------:|
+| here | files check & save |
+| readr | read & save *.rds* files |
+| readxl | read & save *.csv* files |
+| openxlsx | read & write Excel files |
+| Seurat | single-cell RNA-seq analysis |
+| DropletUtils | 10X data processing utilities |
+| Matrix | sparse matrix operations |
+| scDblFinder | doublet detection |
+| scCustomize | scRNA-seq plot customization |
+| dplyr | data manipulation |
+| ggplot2 | data visualization |
+| magrittr | pipe operator support |
+| tidyverse | data science toolkit |
+| reshape2 | data reshaping |
+| S4Vectors | S4 vector structures |
+| SingleCellExperiment | single-cell data container |
+| pheatmap | heatmap visualization |
+| png | PNG image handling |
+| gridExtra | plot and table layouts |
+| knitr | R Markdown rendering |
+| scales | plot scaling utilities |
+| RColorBrewer | color palettes |
+| Matrix.utils | matrix data manipulation |
+| tibble | modern data frames |
+| scater | scRNA-seq QC & visualization |
+| patchwork | plot composition |
+| statmod | statistical modeling |
+| ArchR | scATAC-seq analysis |
+| clustree | cluster resolution visualization |
+| harmony | batch correction & integration |
+| speckle | cell proportion analysis |
+| ggrepel | non-overlapping labels |
+| edgeR | differential expression analysis |
+
+
+# Importing and reading .rds file after integration/normalization and clusterization
+
+```{r read}
+
+integrated <- readRDS(
+  "/media/maksn/Nowy1/demultiplex_results/scripts/metformin_final_annotated.rds"
+)
+
+
+```
+
+# Differential gene expression (using estimation of dispersion) for fibroblasts
+
+## First we create variable which will describe different conditions between our samples
+
+```{r conditions}
+integrated$condition <- integrated$Sample  
+integrated$condition <- dplyr::recode(integrated$condition,
+                                      "CM_NC"       = "NC",
+                                      "CM_MET"      = "MET",
+                                      "CM_TGF"      = "TGF",
+                                      "CM_MET_TGF"  = "MET_TGF")
+
+# Check
+table(integrated$Sample, integrated$condition)
+```
+
+## Then we subset on which cell type we want first to check Differential Expression (DGE)
+
+```{r}
+
+Fibro <- subset(integrated, idents = "Fibroblasts")
+
+Cardio <- subset(integrated, idents = "Cardiomyocytes")
+
+```
+
+
+```{r DGE fibroblasts}
+Idents(Fibro) <- Fibro$condition
+```
+
+```{r DGE cardiomyocytes}
+Idents(Cardio) <- Cardio$condition
+```
+
+
+# Then we divide fibroblast gene data into two collections: First condition to test - healthy nc vs healthy cells with metformin induced, second condition to test: tgf induced ill cells with tgf cells with metformin
+
+```{r}
+
+counts_cardio <- GetAssayData(Cardio, assay = "SCT", layer = "data")
+
+# podział na grupy
+cells_group1_cardio <- WhichCells(Cardio, idents = "NC")
+cells_group2_cardio <- WhichCells(Cardio, idents = "MET")
+cells_group3_cardio <- WhichCells(Cardio, idents = "TGF")
+cells_group4_cardio <- WhichCells(Cardio, idents = "MET_TGF")
+
+# procent ekspresji w każdej grupie
+pct_group1_cardio <- rowSums(counts[, cells_group1] > 0) / length(cells_group1)
+pct_group2_cardio <- rowSums(counts[, cells_group2] > 0) / length(cells_group2)
+pct_group3_cardio <- rowSums(counts[, cells_group3] > 0) / length(cells_group3)
+pct_group4_cardio <- rowSums(counts[, cells_group4] > 0) / length(cells_group4)
+
+# filtr: ≥5% w jednej lub drugiej grupie
+
+# Porównanie NC vs MET
+
+genes_to_test_1_cardio <- names(pct_group1_cardio)[(pct_group1_cardio >= 0.1) | (pct_group2_cardio >= 0.1)]
+
+
+# Porównanie TGF vs MET+TGF
+
+genes_to_test_2_cardio <- names(pct_group2_cardio)[(pct_group2_cardio >= 0.1) | (pct_group4_cardio >= 0.1)]
+
+
+# Porównanie NC vs TGF
+
+genes_to_test_3_cardio <- names(pct_group1_cardio)[(pct_group1_cardio >= 0.1) | (pct_group3_cardio >= 0.1)]
+
+
+```
+
+
+```{r}
+genes_to_plot_cardio <- c("VEGFA", "COL1A1", "TIMP3", "COL14A1", "VIM", "RIGI", "LRP1B", "SAT1")
+
+VlnPlot(Cardio, features = genes_to_plot_cardio, group.by = "Sample", pt.size = 0.5, ncol = 2) +
+  theme_minimal()
+
+```
+
+
+## Now we create contrast and design matrix and estimate dispersion. After estimation we use these three outputs to fit them to general linear model
+
+```{r estimate disp}
+# ----------------------------
+# 1. Przygotowanie danych
+# ----------------------------
+# Załóżmy, że masz counts_matrix (raw counts) fibroblastów
+# i metadata z kolumną 'condition' (np. NC, MET, TGF, MET_TGF)
+counts_cardio <- as.matrix(GetAssayData(Cardio, assay = "RNA", layer = "counts"))
+
+
+
+# wektor grup (musisz mieć dokładnie tyle elementów, ile kolumn w counts)
+group_cardio <- factor(Cardio$condition)
+
+# stwórz DGEList
+dge_cardio <- DGEList(counts = counts_cardio, group = group_cardio)
+
+# projekt modelu
+design_cardio <- model.matrix(~0 + group_cardio)
+colnames(design_cardio) <- levels(group_cardio)
+
+
+contrast_met_nc_cardio <- makeContrasts(NC_vs_MET = MET - NC, levels = design_cardio) 
+contrast_met_tgf_cardio <- makeContrasts(TGF_vs_MET_TGF = `MET_TGF` - TGF, levels = design_cardio) 
+contrast_tgf_nc_cardio <- makeContrasts(NC_vs_TGF = TGF - NC, levels = design_cardio)
+
+
+# MET vs NC
+
+
+dge_met_nc_cardio <- dge[rownames(dge) %in% genes_to_test_1_cardio, , keep.lib.sizes = FALSE]
+
+dge_met_nc_cardio <- estimateDisp(dge_met_nc_cardio, design_cardio)
+fit_met_nc_cardio <- glmFit(dge_met_nc_cardio, design_cardio)
+
+lrt_met_nc_cardio <- glmLRT(fit_met_nc_cardio, contrast = contrast_met_nc_cardio)
+
+
+# MET_TGF vs TGF
+
+dge_met_tgf_cardio <- dge_cardio[rownames(dge_cardio) %in% genes_to_test_2_cardio, , keep.lib.sizes = FALSE]
+
+dge_met_tgf_cardio <- estimateDisp(dge_met_tgf_cardio, design_cardio)
+fit_met_tgf_cardio <- glmFit(dge_met_tgf_cardio, design_cardio)
+
+lrt_met_tgf_cardio <- glmLRT(fit_met_tgf_cardio, contrast = contrast_met_tgf_cardio)
+
+
+# TGF vs NC
+
+dge_tgf_nc_cardio <- dge_cardio[rownames(dge_cardio) %in% genes_to_test_3_cardio, , keep.lib.sizes = FALSE]
+
+dge_tgf_nc_cardio <- estimateDisp(dge_tgf_nc_cardio, design_cardio)
+fit_tgf_nc_cardio <- glmFit(dge_tgf_nc_cardio, design_cardio)
+
+lrt_tgf_nc_cardio <- glmLRT(fit_tgf_nc_cardio, contrast = contrast_tgf_nc_cardio)
+
+
+```
+
+## We convert `glmLRT` function output to simple dataframes for each experiment:
+
+```{r simple data}
+deg_met_nc_cardio <- topTags(lrt_met_nc_cardio, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         avg_log2FC = logFC)
+
+deg_met_tgf_cardio <- topTags(lrt_met_tgf_cardio, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         avg_log2FC = logFC)
+
+deg_tgf_nc_cardio <- topTags(lrt_tgf_nc_cardio, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         avg_log2FC = logFC)
+```
+
+## Now we define schema how we will show volcano plot function and genes on it
+
+```{r volcano function}
+# ----------------------------
+# 4. Volcano plot
+# ----------------------------
+volcano_plot <- function(df, title, logfc_cut = 0.25, fdr_cut = 0.05, top_n = 20) {
+  
+  df <- df %>%
+    mutate(Significant = ifelse(FDR < fdr_cut & abs(avg_log2FC) > logfc_cut,
+                                ifelse(avg_log2FC > 0, "Up", "Down"), "ns"))
+  
+  top_genes <- df %>%
+    filter(Significant != "ns") %>%
+    arrange(desc(abs(avg_log2FC))) %>%
+    slice_head(n = top_n)
+  
+  ggplot(df, aes(x = avg_log2FC, y = -log10(FDR))) +
+    geom_point(aes(color = Significant), alpha = 0.5) +
+    scale_color_manual(values = c("Up" = "red", "Down" = "blue", "ns" = "grey")) +
+    geom_hline(yintercept = -log10(fdr_cut), linetype = "dashed", color = "black") +
+    geom_vline(xintercept = c(-logfc_cut, logfc_cut), linetype = "dashed", color = "black") +
+    geom_text_repel(data = top_genes, aes(label = gene), size = 3, max.overlaps = 20) +
+    theme_classic() +
+    labs(title = title, x = "log2 Fold Change", y = "-log10(FDR)")
+}
+```
+
+
+## Lastly we run volcano function on our two dataframes from two conditions, we save it to png file.
+
+```{r}
+# Wyświetlenie
+p1_cardio <- volcano_plot(deg_met_nc_cardio, "NC vs MET")
+p2_cardio <- volcano_plot(deg_met_tgf_cardio, "TGF vs MET+TGF")
+p3_cardio <- volcano_plot(deg_tgf_nc_cardio, "NC vs TGF")
+
+library(patchwork)
+#p1 | 
+p1_cardio | p2_cardio | p3_cardio
+
+# Zapis do pliku
+png("volcano_edgeR_metformin_Cardiomyocytes.png", width = 1600, height = 800)
+p1_cardio | p2_cardio | p3_cardio
+dev.off()
+```
+
+
+
+
+
+# Then we divide fibroblast gene data into two collections: First condition to test - healthy nc vs healthy cells with metformin induced, second condition to test: tgf induced ill cells with tgf cells with metformin
+
+```{r}
+
+counts_fibro <- GetAssayData(Fibro, assay = "SCT", layer = "data")
+
+# podział na grupy
+cells_group1_fibro <- WhichCells(Fibro, idents = "NC")
+cells_group2_fibro <- WhichCells(Fibro, idents = "MET")
+cells_group3_fibro <- WhichCells(Fibro, idents = "TGF")
+cells_group4_fibro <- WhichCells(Fibro, idents = "MET_TGF")
+
+# procent ekspresji w każdej grupie
+pct_group1_fibro <- rowSums(counts_fibro[, cells_group1_fibro] > 0) / length(cells_group1_fibro)
+pct_group2_fibro <- rowSums(counts_fibro[, cells_group2_fibro] > 0) / length(cells_group2_fibro)
+pct_group3_fibro <- rowSums(counts_fibro[, cells_group3_fibro] > 0) / length(cells_group3_fibro)
+pct_group4_fibro <- rowSums(counts_fibro[, cells_group4_fibro] > 0) / length(cells_group4_fibro)
+
+# filtr: ≥5% w jednej lub drugiej grupie
+
+# Porównanie NC vs MET
+
+genes_to_test_1_fibro <- names(pct_group1_fibro)[(pct_group1_fibro >= 0.1) | (pct_group2_fibro >= 0.1)]
+
+
+# Porównanie TGF vs MET+TGF
+
+genes_to_test_2_fibro <- names(pct_group2_fibro)[(pct_group2_fibro >= 0.1) | (pct_group4_fibro >= 0.1)]
+
+
+# Porównanie NC vs TGF
+
+genes_to_test_3_fibro <- names(pct_group1_fibro)[(pct_group1_fibro >= 0.1) | (pct_group3_fibro >= 0.1)]
+
+
+```
+
+
+```{r}
+genes_to_plot_fibro <- c("VEGFA", "COL1A1", "TIMP3", "COL14A1", "VIM", "RIGI", "LRP1B", "SAT1")
+
+VlnPlot(Fibro, features = genes_to_plot_fibro, group.by = "Sample", pt.size = 0.5, ncol = 2) +
+  theme_minimal()
+
+```
+
+
+## Now we create contrast and design matrix and estimate dispersion. After estimation we use these three outputs to fit them to general linear model
+
+```{r estimate disp}
+# ----------------------------
+# 1. Przygotowanie danych
+# ----------------------------
+# Załóżmy, że masz counts_matrix (raw counts) fibroblastów
+# i metadata z kolumną 'condition' (np. NC, MET, TGF, MET_TGF)
+counts_fibro <- as.matrix(GetAssayData(Fibro, assay = "RNA", layer = "counts"))
+
+
+
+# wektor grup (musisz mieć dokładnie tyle elementów, ile kolumn w counts)
+group_fibro <- factor(Fibro$condition)
+
+# stwórz DGEList
+dge_fibro <- DGEList(counts = counts_fibro, group = group_fibro)
+
+# projekt modelu
+design_fibro <- model.matrix(~0 + group_fibro)
+colnames(design_fibro) <- levels(group_fibro)
+
+
+contrast_met_nc_fibro <- makeContrasts(NC_vs_MET = MET - NC, levels = design_fibro) 
+contrast_met_tgf_fibro <- makeContrasts(TGF_vs_MET_TGF = `MET_TGF` - TGF, levels = design_fibro) 
+contrast_tgf_nc_fibro <- makeContrasts(NC_vs_TGF = TGF - NC, levels = design_fibro)
+
+
+# MET vs NC
+
+
+dge_met_nc_fibro <- dge_fibro[rownames(dge_fibro) %in% genes_to_test_1_fibro, , keep.lib.sizes = FALSE]
+
+dge_met_nc_fibro <- estimateDisp(dge_met_nc_fibro, design_fibro)
+fit_met_nc_fibro <- glmFit(dge_met_nc_fibro, design_fibro)
+
+lrt_met_nc_fibro <- glmLRT(fit_met_nc_fibro, contrast = contrast_met_nc_fibro)
+
+
+# MET_TGF vs TGF
+
+dge_met_tgf_fibro <- dge_fibro[rownames(dge_fibro) %in% genes_to_test_2_fibro, , keep.lib.sizes = FALSE]
+
+dge_met_tgf_fibro <- estimateDisp(dge_met_tgf_fibro, design_fibro)
+fit_met_tgf_fibro <- glmFit(dge_met_tgf_fibro, design_fibro)
+
+lrt_met_tgf_fibro <- glmLRT(fit_met_tgf_fibro, contrast = contrast_met_tgf_fibro)
+
+
+# TGF vs NC
+
+dge_tgf_nc_fibro <- dge_fibro[rownames(dge_fibro) %in% genes_to_test_3_fibro, , keep.lib.sizes = FALSE]
+
+dge_tgf_nc_fibro <- estimateDisp(dge_tgf_nc_fibro, design_fibro)
+fit_tgf_nc_fibro <- glmFit(dge_tgf_nc_fibro, design_fibro)
+
+lrt_tgf_nc_fibro <- glmLRT(fit_tgf_nc_fibro, contrast = contrast_tgf_nc_fibro)
+
+
+```
+
+## We convert `glmLRT` function output to simple dataframes for each experiment:
+
+```{r simple data}
+deg_met_nc_fibro <- topTags(lrt_met_nc_fibro, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         avg_log2FC = logFC)
+
+deg_met_tgf_fibro <- topTags(lrt_met_tgf_fibro, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         avg_log2FC = logFC)
+
+deg_tgf_nc_fibro <- topTags(lrt_tgf_nc_fibro, n = Inf)$table %>%
+  mutate(gene = rownames(.),
+         avg_log2FC = logFC)
+```
+
+## Now we define schema how we will show volcano plot function and genes on it
+
+
+## Lastly we run volcano function on our two dataframes from two conditions, we save it to png file.
+
+```{r}
+# Wyświetlenie
+p1_fibro <- volcano_plot(deg_met_nc_fibro, "NC vs MET")
+p2_fibro <- volcano_plot(deg_met_tgf_fibro, "TGF vs MET+TGF")
+p3_fibro <- volcano_plot(deg_tgf_nc_fibro, "NC vs TGF")
+
+library(patchwork)
+#p1 | 
+p1_fibro | p2_fibro | p3_fibro
+
+# Zapis do pliku
+png("volcano_edgeR_metformin_Fibroblasts.png", width = 1600, height = 800)
+p1_fibro | p2_fibro | p3_fibro
+dev.off()
+
+```
+
+
+# Saving
+
+
+
+## Saving to final csv-s cardiomyocytes results:
+
+```{r}
+
+write.csv(deg_met_nc_cardio, file = "deg_MET_vs_NC_cardio.csv", row.names = FALSE)
+write.csv(deg_met_tgf_cardio, file = "deg_MET_TGF_vs_TGF_cardio.csv", row.names = FALSE)
+write.csv(deg_tgf_nc_cardio, file = "deg_TGF_vs_NC_cardio.csv", row.names = FALSE)
+
+```
+
+
+## Saving to final csv-s fibroblasts results:
+
+```{r}
+
+write.csv(deg_met_nc_fibro, file = "deg_MET_vs_NC_fibro.csv", row.names = FALSE)
+write.csv(deg_met_tgf_fibro, file = "deg_MET_TGF_vs_TGF_fibro.csv", row.names = FALSE)
+write.csv(deg_tgf_nc_fibro, file = "deg_TGF_vs_NC_fibro.csv", row.names = FALSE)
+
+```
+
